@@ -1,13 +1,10 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { ProbeResults } from "./probe.js";
 import { z } from "zod";
-import { runAllProbes } from "./probe.js";
-
-function check(ok: boolean): string {
-  return ok ? "\u2713" : "\u2717";
-}
+import { check, textResult } from "./format.js";
 
 function buildSurvey(
-  probes: Awaited<ReturnType<typeof runAllProbes>>,
+  probes: ProbeResults,
   binaryPath: string,
 ): string {
   const lines: string[] = [];
@@ -156,12 +153,13 @@ function buildConfig(
     env["SSH_AUTH_SOCK"] = "${SSH_AUTH_SOCK}";
   }
 
-  if (setup.gh_method === "user" && setup.gh_value) {
-    env["MCP_GH_USER"] = setup.gh_value;
-  } else if (setup.gh_method === "token" && setup.gh_value) {
-    env["GH_TOKEN"] = setup.gh_value;
-  } else if (setup.gh_method === "config-dir" && setup.gh_value) {
-    env["GH_CONFIG_DIR"] = setup.gh_value;
+  const ghEnvKey: Record<string, string> = {
+    user: "MCP_GH_USER",
+    token: "GH_TOKEN",
+    "config-dir": "GH_CONFIG_DIR",
+  };
+  if (setup.gh_method && setup.gh_value && ghEnvKey[setup.gh_method]) {
+    env[ghEnvKey[setup.gh_method]] = setup.gh_value;
   }
 
   const serverConfig: McpServerConfig = { command: binaryPath };
@@ -231,6 +229,7 @@ function buildConfig(
 export function registerOnboardTool(
   server: McpServer,
   binaryPath: string,
+  probes: ProbeResults,
 ): void {
   server.registerTool(
     "onboard",
@@ -265,19 +264,9 @@ export function registerOnboardTool(
     },
     async ({ setup }) => {
       if (!setup) {
-        // Discovery mode: probe and return survey
-        const probes = await runAllProbes();
-        const survey = buildSurvey(probes, binaryPath);
-        return {
-          content: [{ type: "text" as const, text: survey }],
-        };
+        return textResult(buildSurvey(probes, binaryPath));
       }
-
-      // Config generation mode
-      const config = buildConfig(binaryPath, setup);
-      return {
-        content: [{ type: "text" as const, text: config }],
-      };
+      return textResult(buildConfig(binaryPath, setup));
     },
   );
 }

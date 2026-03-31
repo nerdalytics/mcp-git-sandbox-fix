@@ -23,6 +23,7 @@ MCP server that exposes `git` and `gh` CLI tools outside Claude Code's sandbox, 
 | `src/index.ts` | Server setup, tool registration for `git` and `gh` |
 | `src/executor.ts` | `execCommand` wrapper around `execFile` with timeout/stdin support |
 | `src/allowlist.ts` | Allowed subcommand sets for `git` and `gh` |
+| `src/format.ts` | Shared helpers: `check()`, `textResult()` |
 | `.mcp.json` | MCP server config pointing to compiled binary |
 | `mise.local.toml` | Local tooling (Bun version) and gh auth hook |
 

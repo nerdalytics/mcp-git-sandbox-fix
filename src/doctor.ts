@@ -1,15 +1,11 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ProbeResults } from "./probe.js";
-
-function check(ok: boolean): string {
-  return ok ? "\u2713" : "\u2717";
-}
+import { check, textResult } from "./format.js";
 
 function formatReport(probes: ProbeResults, ghRegistered: boolean): string {
   const lines: string[] = [];
   const recommendations: string[] = [];
 
-  // --- Environment ---
   lines.push("## Environment");
   lines.push(`  HOME: ${probes.env.home ?? "(not set)"}`);
   lines.push(`  PATH: ${probes.env.path ?? "(not set)"}`);
@@ -25,7 +21,6 @@ function formatReport(probes: ProbeResults, ghRegistered: boolean): string {
   );
   lines.push("");
 
-  // --- Binaries ---
   lines.push("## Binaries");
   lines.push(
     `  git: ${check(probes.git.found)} ${probes.git.version ?? "not found"}`,
@@ -41,7 +36,6 @@ function formatReport(probes: ProbeResults, ghRegistered: boolean): string {
   );
   lines.push("");
 
-  // --- Git Identity ---
   lines.push("## Git Identity");
   if (probes.gitIdentity.configured) {
     lines.push(`  user.name: ${probes.gitIdentity.userName}`);
@@ -61,7 +55,6 @@ function formatReport(probes: ProbeResults, ghRegistered: boolean): string {
   }
   lines.push("");
 
-  // --- Commit Signing ---
   lines.push("## Commit Signing");
   const s = probes.gitSigning;
 
@@ -135,7 +128,6 @@ function formatReport(probes: ProbeResults, ghRegistered: boolean): string {
   }
   lines.push("");
 
-  // --- SSH Agent ---
   lines.push("## SSH Agent");
   if (!probes.env.sshAuthSock) {
     lines.push("  SSH_AUTH_SOCK: not set");
@@ -164,7 +156,6 @@ function formatReport(probes: ProbeResults, ghRegistered: boolean): string {
   }
   lines.push("");
 
-  // --- GitHub CLI Authentication ---
   lines.push("## GitHub CLI Authentication");
   const hasGhConfig = !!(
     probes.env.mcpGhUser ||
@@ -207,7 +198,6 @@ function formatReport(probes: ProbeResults, ghRegistered: boolean): string {
     }
   }
 
-  // Note priority conflict
   if (probes.env.mcpGhUser && probes.env.ghToken) {
     lines.push("");
     lines.push(
@@ -216,7 +206,6 @@ function formatReport(probes: ProbeResults, ghRegistered: boolean): string {
   }
   lines.push("");
 
-  // --- Active Tools ---
   lines.push("## Active Tools");
   lines.push(`  git: ${check(true)} enabled`);
   if (ghRegistered) {
@@ -230,7 +219,6 @@ function formatReport(probes: ProbeResults, ghRegistered: boolean): string {
   lines.push(`  doctor: ${check(true)} enabled`);
   lines.push("");
 
-  // --- Auth Priority Reference ---
   lines.push("## gh Authentication Priority");
   lines.push("  The server resolves gh authentication in this order (first match wins):");
   lines.push(
@@ -242,7 +230,6 @@ function formatReport(probes: ProbeResults, ghRegistered: boolean): string {
   );
   lines.push("");
 
-  // --- Recommendations ---
   if (!probes.gh.found && !hasGhConfig) {
     // gh not found and not configured — don't recommend anything, user probably doesn't need it
   } else if (probes.gh.found && !hasGhConfig) {
@@ -292,10 +279,7 @@ export function registerDoctorTool(
         "and actionable recommendations for fixing configuration issues.",
     },
     async () => {
-      const report = formatReport(probes, ghRegistered);
-      return {
-        content: [{ type: "text" as const, text: report }],
-      };
+      return textResult(formatReport(probes, ghRegistered));
     },
   );
 }

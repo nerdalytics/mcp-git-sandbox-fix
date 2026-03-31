@@ -118,7 +118,6 @@ async function probeGitSigning(): Promise<GitSigningProbe> {
     }
   }
 
-  // Only attempt signing test for SSH signing with a key configured
   if (gpgFormat !== "ssh" || !signingKey) {
     return {
       gpgFormat,
@@ -198,18 +197,35 @@ async function probeSshAgent(): Promise<SshAgentProbe> {
   };
 }
 
+async function checkGhAuthStatus(
+  authMethod: GhAuthProbe["authMethod"],
+  fallbackAccount: string | null = null,
+): Promise<GhAuthProbe> {
+  const statusResult = await execCommand("gh", {
+    args: ["auth", "status"],
+    timeout_ms: PROBE_TIMEOUT,
+  });
+
+  const output = statusResult.stdout + statusResult.stderr;
+  const match = output.match(/account\s+(\S+)/);
+
+  return {
+    authenticated: statusResult.exitCode === 0,
+    account: match?.[1] || fallbackAccount,
+    authMethod,
+    error: statusResult.exitCode !== 0 ? statusResult.stderr.trim() : null,
+  };
+}
+
 async function resolveGhAuth(ghFound: boolean): Promise<GhAuthProbe> {
   const mcpGhUser = process.env.MCP_GH_USER;
   const ghToken = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
   const ghConfigDir = process.env.GH_CONFIG_DIR;
 
-  const hasGhConfig = !!(mcpGhUser || ghToken || ghConfigDir);
-
-  if (!ghFound || !hasGhConfig) {
+  if (!ghFound || !(mcpGhUser || ghToken || ghConfigDir)) {
     return { authenticated: false, account: null, authMethod: null, error: null };
   }
 
-  // Priority 1: MCP_GH_USER — resolve token via gh auth token
   if (mcpGhUser) {
     const tokenResult = await execCommand("gh", {
       args: ["auth", "token", "--user", mcpGhUser],
@@ -230,59 +246,18 @@ async function resolveGhAuth(ghFound: boolean): Promise<GhAuthProbe> {
       process.env.GH_TOKEN = resolvedToken;
     }
 
-    const statusResult = await execCommand("gh", {
-      args: ["auth", "status"],
-      timeout_ms: PROBE_TIMEOUT,
-    });
-
-    const output = statusResult.stdout + statusResult.stderr;
-    const match = output.match(/account\s+(\S+)/);
-
-    return {
-      authenticated: statusResult.exitCode === 0,
-      account: match?.[1] || mcpGhUser,
-      authMethod: "user",
-      error: statusResult.exitCode !== 0 ? statusResult.stderr.trim() : null,
-    };
+    return checkGhAuthStatus("user", mcpGhUser);
   }
 
-  // Priority 2: GH_TOKEN / GITHUB_TOKEN — verify with gh auth status
   if (ghToken) {
-    const statusResult = await execCommand("gh", {
-      args: ["auth", "status"],
-      timeout_ms: PROBE_TIMEOUT,
-    });
-
-    const output = statusResult.stdout + statusResult.stderr;
-    const match = output.match(/account\s+(\S+)/);
-
-    return {
-      authenticated: statusResult.exitCode === 0,
-      account: match?.[1] || null,
-      authMethod: "token",
-      error: statusResult.exitCode !== 0 ? statusResult.stderr.trim() : null,
-    };
+    return checkGhAuthStatus("token");
   }
 
-  // Priority 3: GH_CONFIG_DIR — verify with gh auth status
-  const statusResult = await execCommand("gh", {
-    args: ["auth", "status"],
-    timeout_ms: PROBE_TIMEOUT,
-  });
-
-  const output = statusResult.stdout + statusResult.stderr;
-  const match = output.match(/account\s+(\S+)/);
-
-  return {
-    authenticated: statusResult.exitCode === 0,
-    account: match?.[1] || null,
-    authMethod: "config-dir",
-    error: statusResult.exitCode !== 0 ? statusResult.stderr.trim() : null,
-  };
+  return checkGhAuthStatus("config-dir");
 }
 
 export async function runAllProbes(): Promise<ProbeResults> {
-  // Capture env snapshot BEFORE auth resolution can mutate process.env.GH_TOKEN
+  // Snapshot before auth resolution mutates process.env.GH_TOKEN
   const env = {
     home: process.env.HOME || null,
     path: process.env.PATH || null,
@@ -292,7 +267,6 @@ export async function runAllProbes(): Promise<ProbeResults> {
     ghConfigDir: process.env.GH_CONFIG_DIR || null,
   };
 
-  // Phase 1: binary probes in parallel
   const [git, gh, ssh, gpg] = await Promise.all([
     probeBinary("git"),
     probeBinary("gh"),
@@ -300,7 +274,7 @@ export async function runAllProbes(): Promise<ProbeResults> {
     probeBinary("gpg"),
   ]);
 
-  // Phase 2: dependent probes in parallel (gh auth depends on gh binary result)
+  // Gated on binary availability from the first batch
   const [gitIdentity, gitSigning, sshAgent, ghAuth] = await Promise.all([
     git.found
       ? probeGitIdentity()

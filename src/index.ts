@@ -6,6 +6,7 @@ import {
   GIT_ALLOWED_SUBCOMMANDS,
   GH_ALLOWED_SUBCOMMANDS,
 } from "./allowlist.js";
+import { textResult } from "./format.js";
 import { runAllProbes } from "./probe.js";
 import { registerDoctorTool } from "./doctor.js";
 import { registerOnboardTool } from "./onboard.js";
@@ -15,16 +16,38 @@ const server = new McpServer({
   version: "0.1.0",
 });
 
+function validateSubcommand(
+  subcommand: string,
+  allowed: Set<string>,
+) {
+  if (!allowed.has(subcommand)) {
+    return textResult(
+      `Subcommand "${subcommand}" is not allowed. Allowed: ${[...allowed].join(", ")}`,
+      true,
+    );
+  }
+  return null;
+}
+
+function execResult(tool: string, result: { stdout: string; stderr: string; exitCode: number }) {
+  if (result.exitCode !== 0) {
+    return textResult(
+      `${tool} exited with code ${result.exitCode}\n\nstderr:\n${result.stderr}\n\nstdout:\n${result.stdout}`,
+      true,
+    );
+  }
+  return textResult(result.stdout || result.stderr || "(no output)");
+}
+
 async function main() {
-  // Set env overrides once — child processes inherit them naturally
-  // via C-level environ without needing an explicit env object.
+  // Disable terminal prompts in child processes — prevents git/gh
+  // from hanging when they try to prompt for credentials interactively.
   process.env.GIT_TERMINAL_PROMPT = "0";
   process.env.GH_PROMPT_DISABLED = "1";
   process.env.BROWSER = "";
 
   const probes = await runAllProbes();
 
-  // --- git: always registered ---
   server.registerTool(
     "git",
     {
@@ -54,26 +77,12 @@ async function main() {
     async ({ args, cwd, stdin, timeout_ms }) => {
       const subcommand = args[0];
 
-      if (!GIT_ALLOWED_SUBCOMMANDS.has(subcommand)) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text" as const,
-              text: `Subcommand "${subcommand}" is not allowed. Allowed: ${[...GIT_ALLOWED_SUBCOMMANDS].join(", ")}`,
-            },
-          ],
-        };
-      }
+      const denied = validateSubcommand(subcommand, GIT_ALLOWED_SUBCOMMANDS);
+      if (denied) return denied;
 
-      // For commit operations where SSH signing is expected, use a
-      // minimal wrapper as gpg.ssh.program. The previous wrapper with
-      // pipes and fd redirects broke git's subprocess management.
-      //
-      // New approach: log env to a file, then exec ssh-keygen.
-      // exec replaces the shell process — git's pipes connect directly
-      // to ssh-keygen with zero intermediary. No pipes, no tee, no
-      // fd clobbering.
+      // Detect whether this commit should be signed so we can verify afterward.
+      // git silently produces unsigned commits when signing fails, so we
+      // check the raw commit object post-commit to catch that.
       const isCommit = subcommand === "commit";
       const explicitSign = args.includes("-S") || args.includes("--gpg-sign");
       let signingExpected = false;
@@ -90,89 +99,57 @@ async function main() {
             gpgsignCheck.stdout.trim() === "true");
       }
 
-      // No gpg.ssh.program override needed — git finds ssh-keygen via
-      // the inherited PATH. Previous -c flag and wrapper approaches all
-      // failed because Bun's process.env spread was incomplete.
+      const result = await execCommand("git", {
+        args,
+        cwd,
+        stdin,
+        timeout_ms,
+      });
 
-      try {
-        const result = await execCommand("git", {
-          args,
+      if (result.exitCode !== 0) {
+        return execResult("git", result);
+      }
+
+      // Post-commit signature verification.
+      // Check for the gpgsig header in the raw commit object instead of
+      // %G?, which requires gpg.ssh.allowedSignersFile for SSH signatures
+      // and returns "N" (no signature) even when a valid signature exists.
+      if (isCommit && signingExpected) {
+        const rawCheck = await execCommand("git", {
+          args: ["show", "-s", "--format=raw", "HEAD"],
           cwd,
-          stdin,
-          timeout_ms,
+          timeout_ms: 5000,
         });
 
-        if (result.exitCode !== 0) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text" as const,
-                text: `git exited with code ${result.exitCode}\n\nstderr:\n${result.stderr}\n\nstdout:\n${result.stdout}`,
-              },
-            ],
-          };
-        }
-
-        // Post-commit signature verification.
-        // Check for the gpgsig header in the raw commit object instead of
-        // %G?, which requires gpg.ssh.allowedSignersFile for SSH signatures
-        // and returns "N" (no signature) even when a valid signature exists.
-        if (isCommit && signingExpected) {
-          const rawCheck = await execCommand("git", {
-            args: ["show", "-s", "--format=raw", "HEAD"],
+        if (!rawCheck.stdout.includes("gpgsig ")) {
+          const signingKey = await execCommand("git", {
+            args: ["config", "user.signingkey"],
             cwd,
             timeout_ms: 5000,
           });
+          const keyPath =
+            signingKey.exitCode === 0 ? signingKey.stdout.trim() : null;
 
-          const hasSignature = rawCheck.stdout.includes("gpgsig ");
-
-          if (!hasSignature) {
-            const signingKey = await execCommand("git", {
-              args: ["config", "user.signingkey"],
-              cwd,
-              timeout_ms: 5000,
-            });
-            const keyPath =
-              signingKey.exitCode === 0 ? signingKey.stdout.trim() : null;
-
-            const output = result.stdout || "(no output)";
-            return {
-              isError: true,
-              content: [
-                {
-                  type: "text" as const,
-                  text:
-                    `WARNING: Commit was created but is NOT signed.\n` +
-                    `Signing was expected (${explicitSign ? "-S flag" : "commit.gpgsign=true"}) ` +
-                    `but git produced an unsigned commit.\n` +
-                    `user.signingkey: ${keyPath ?? "(not set in this repo)"}` +
-                    `\nSSH_AUTH_SOCK: ${process.env.SSH_AUTH_SOCK ?? "(not set)"}` +
-                    `\n\ngit output:\n${output}`,
-                },
-              ],
-            };
-          }
+          return textResult(
+            `WARNING: Commit was created but is NOT signed.\n` +
+            `Signing was expected (${explicitSign ? "-S flag" : "commit.gpgsign=true"}) ` +
+            `but git produced an unsigned commit.\n` +
+            `user.signingkey: ${keyPath ?? "(not set in this repo)"}` +
+            `\nSSH_AUTH_SOCK: ${process.env.SSH_AUTH_SOCK ?? "(not set)"}` +
+            `\n\ngit output:\n${result.stdout || "(no output)"}`,
+            true,
+          );
         }
+      }
 
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: result.stdout || result.stderr || "(no output)",
-            },
-          ],
-        };
-      } finally {}
+      return textResult(result.stdout || result.stderr || "(no output)");
     },
   );
 
-  // --- gh: only registered when explicitly configured ---
   const ghConfigured =
-    !!process.env.MCP_GH_USER ||
-    !!process.env.GH_TOKEN ||
-    !!process.env.GITHUB_TOKEN ||
-    !!process.env.GH_CONFIG_DIR;
+    !!probes.env.mcpGhUser ||
+    probes.env.ghToken ||
+    !!probes.env.ghConfigDir;
 
   const ghRegistered = probes.gh.found && ghConfigured;
 
@@ -201,54 +178,20 @@ async function main() {
         },
       },
       async ({ args, cwd, stdin, timeout_ms }) => {
-        const subcommand = args[0];
-
-        if (!GH_ALLOWED_SUBCOMMANDS.has(subcommand)) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text" as const,
-                text: `Subcommand "${subcommand}" is not allowed. Allowed: ${[...GH_ALLOWED_SUBCOMMANDS].join(", ")}`,
-              },
-            ],
-          };
-        }
+        const denied = validateSubcommand(args[0], GH_ALLOWED_SUBCOMMANDS);
+        if (denied) return denied;
 
         const result = await execCommand("gh", { args, cwd, stdin, timeout_ms });
-
-        if (result.exitCode !== 0) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text" as const,
-                text: `gh exited with code ${result.exitCode}\n\nstderr:\n${result.stderr}\n\nstdout:\n${result.stdout}`,
-              },
-            ],
-          };
-        }
-
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: result.stdout || result.stderr || "(no output)",
-            },
-          ],
-        };
+        return execResult("gh", result);
       },
     );
   }
 
-  // --- doctor: always registered ---
   registerDoctorTool(server, probes, ghRegistered);
 
-  // --- onboard: always registered ---
   const binaryPath = process.execPath;
-  registerOnboardTool(server, binaryPath);
+  registerOnboardTool(server, binaryPath, probes);
 
-  // --- connect ---
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
