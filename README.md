@@ -1,0 +1,239 @@
+# mcp-unsandboxed-git-cli
+
+An MCP server that runs `git` and `gh` CLI commands **outside** Claude Code's macOS sandbox, working around known sandbox bugs that break:
+
+- **Git SSH signing** -- sandbox blocks SSH/raw TCP, preventing commit signing with SSH keys
+- **GitHub CLI (gh) TLS** -- sandbox blocks `com.apple.trustd.agent` Mach IPC, causing Go binaries to fail with `x509: OSStatus -26276`
+- **Heredoc temp files** -- sandbox blocks `/tmp` writes needed for multi-line commit messages
+
+The server runs as a standalone binary that inherits the user's configured environment -- no shell, no profile scripts, no implicit state.
+
+## Configure in Claude Code
+
+Register the server globally with `claude mcp add`, or add a `.mcp.json` at the project root to share it with collaborators.
+
+The server progressively discloses tools based on what you configure. Only `git` and `doctor` are always available. The `gh` tool requires explicit authentication configuration.
+
+### Minimal: git only
+
+No env vars needed. The MCP SDK passes `HOME` and `PATH` by default, which is enough for local git operations (status, log, diff, add, commit, branch, etc.).
+
+```sh
+claude mcp add -s user -t stdio mcp-unsandboxed-git-cli \
+  /absolute/path/to/dist/mcp-unsandboxed-git-cli
+```
+
+### git + SSH
+
+Required for `git push`/`pull` over SSH and SSH commit signing. Forward the SSH agent socket so the server can reach your keys.
+
+```sh
+claude mcp add -s user -t stdio mcp-unsandboxed-git-cli \
+  -e SSH_AUTH_SOCK='${SSH_AUTH_SOCK}' \
+  /absolute/path/to/dist/mcp-unsandboxed-git-cli
+```
+
+### git + gh (with account selection)
+
+The `gh` tool is only registered when you explicitly configure authentication. This prevents the server from silently using the wrong account.
+
+**Recommended: select a specific gh account (works with SSO and multi-account setups):**
+
+```sh
+claude mcp add -s user -t stdio mcp-unsandboxed-git-cli \
+  -e SSH_AUTH_SOCK='${SSH_AUTH_SOCK}' \
+  -e MCP_GH_USER=your-github-username \
+  /absolute/path/to/dist/mcp-unsandboxed-git-cli
+```
+
+At startup the server runs `gh auth token --user <value>` to resolve the account's token from your local gh credential store. No global state is mutated -- the token is extracted and used for this server session only.
+
+**Alternative: use a personal access token directly:**
+
+```sh
+claude mcp add -s user -t stdio mcp-unsandboxed-git-cli \
+  -e SSH_AUTH_SOCK='${SSH_AUTH_SOCK}' \
+  -e GH_TOKEN=ghp_... \
+  /absolute/path/to/dist/mcp-unsandboxed-git-cli
+```
+
+**Alternative: point to a gh config directory:**
+
+```sh
+claude mcp add -s user -t stdio mcp-unsandboxed-git-cli \
+  -e SSH_AUTH_SOCK='${SSH_AUTH_SOCK}' \
+  -e GH_CONFIG_DIR='${HOME}/.config/gh' \
+  /absolute/path/to/dist/mcp-unsandboxed-git-cli
+```
+
+`claude mcp add` writes to `~/.claude.json` (user scope) or `.claude.json` in the project root (project scope).
+
+Alternatively, add a `.mcp.json` at the project root -- useful for sharing the config with collaborators:
+
+```json
+{
+  "mcpServers": {
+    "mcp-unsandboxed-git-cli": {
+      "command": "/absolute/path/to/dist/mcp-unsandboxed-git-cli",
+      "env": {
+        "SSH_AUTH_SOCK": "${SSH_AUTH_SOCK}",
+        "MCP_GH_USER": "your-github-username"
+      }
+    }
+  }
+}
+```
+
+### gh authentication priority
+
+When multiple auth variables are set, the server uses the first match:
+
+1. `MCP_GH_USER` -- resolves token via `gh auth token --user <value>`
+2. `GH_TOKEN` / `GITHUB_TOKEN` -- uses token directly
+3. `GH_CONFIG_DIR` -- defers to the active account in that config directory
+
+### Environment variables reference
+
+The MCP SDK passes `HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM`, and `USER` by default. Anything else must be explicitly forwarded via `-e` flags or the `env` block.
+
+| Variable | Purpose | When needed |
+|----------|---------|-------------|
+| `SSH_AUTH_SOCK` | SSH agent socket for key-based auth and signing | git push/pull over SSH, SSH commit signing |
+| `MCP_GH_USER` | gh account to use (resolved at startup) | gh tool with SSO or multi-account |
+| `GH_TOKEN` | GitHub personal access token | gh tool with a specific token |
+| `GITHUB_TOKEN` | Alternative GitHub token variable | gh tool with a specific token |
+| `GH_CONFIG_DIR` | Path to gh config directory | gh tool with stored credentials |
+
+Only include variables that are set in your environment -- unset `${VAR}` references cause warnings.
+
+## Tools
+
+### `git`
+
+Always available. Run any allowlisted git subcommand.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `args` | `string[]` | Yes | Git arguments, e.g. `["commit", "-S", "-F", "-"]` |
+| `cwd` | `string` | No | Working directory (defaults to server cwd) |
+| `stdin` | `string` | No | Text piped to stdin (use with `git commit -F -`) |
+| `timeout_ms` | `number` | No | Timeout in ms (default 60000) |
+
+**Allowed subcommands:** `status`, `log`, `diff`, `show`, `branch`, `tag`, `remote`, `rev-parse`, `ls-files`, `ls-remote`, `blame`, `shortlog`, `describe`, `config`, `stash`, `add`, `reset`, `restore`, `rm`, `commit`, `merge`, `rebase`, `cherry-pick`, `revert`, `checkout`, `switch`, `fetch`, `pull`, `push`, `clone`, `clean`, `gc`, `init`, `worktree`
+
+### `gh`
+
+Available only when gh authentication is configured. Run any allowlisted GitHub CLI subcommand.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `args` | `string[]` | Yes | gh arguments, e.g. `["pr", "list", "--limit", "10"]` |
+| `cwd` | `string` | No | Working directory (defaults to server cwd) |
+| `stdin` | `string` | No | Text piped to stdin |
+| `timeout_ms` | `number` | No | Timeout in ms (default 60000) |
+
+**Allowed subcommands:** `pr`, `issue`, `repo`, `release`, `run`, `workflow`, `api`, `status`, `search`, `label`, `project`, `variable`, `secret`, `auth`, `browse`, `gist`, `codespace`, `cache`, `ruleset`, `attestation`
+
+### `doctor`
+
+Always available. Takes no arguments. Diagnoses the server environment and reports:
+
+- Binary availability (git, gh, ssh, gpg)
+- Git identity (user.name, user.email)
+- SSH agent status
+- gh authentication status and method
+- Which tools are active and why
+- Actionable recommendations for fixing issues
+
+Run the doctor tool after registering the server to verify your configuration.
+
+## Prerequisites
+
+- `git` installed and on PATH
+
+Optional, depending on configuration:
+
+- `gh` installed and authenticated (`gh auth login`) for the gh tool
+- SSH agent running for SSH operations
+- `gpg` installed for GPG commit signing
+
+## Install
+
+```sh
+bun install
+```
+
+## Build
+
+```sh
+bun run build
+```
+
+Produces a standalone executable at `dist/mcp-unsandboxed-git-cli` (~66 MB). The binary is large because `bun build --compile` embeds the entire Bun runtime (JavaScriptCore engine, Node.js API compatibility, crypto, etc.). The actual application code is a few hundred KB -- the rest is the runtime. The tradeoff: no runtime dependencies needed on the target machine.
+
+## Run (development)
+
+```sh
+bun run start
+```
+
+## Test
+
+### Smoke test (initialize handshake)
+
+```sh
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0.1.0"}}}' \
+  | ./dist/mcp-unsandboxed-git-cli
+```
+
+### Run the doctor tool
+
+```sh
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0.1.0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"doctor","arguments":{}}}' \
+  | ./dist/mcp-unsandboxed-git-cli
+```
+
+### Test allowlist rejection
+
+```sh
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0.1.0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"git","arguments":{"args":["daemon"]}}}' \
+  | ./dist/mcp-unsandboxed-git-cli
+```
+
+Replace `./dist/mcp-unsandboxed-git-cli` with `bun run src/index.ts` for development testing.
+
+## Security
+
+Commands are executed with `child_process.execFile` (no shell). Arguments are passed as an array, so shell metacharacters like `;`, `&&`, `$()`, and backticks are treated as literal strings -- no command injection is possible.
+
+| Layer | Mechanism |
+|-------|-----------|
+| No shell | `execFile` without `shell: true` -- args are an array, not a parsed string |
+| Subcommand allowlist | First arg must be in the known set (`src/allowlist.ts`) |
+| Progressive disclosure | `gh` tool only exposed when auth is explicitly configured |
+| Output cap | 1 MB `maxBuffer` prevents memory exhaustion |
+| Timeout | 60s default prevents hanging processes |
+| No interactive prompts | `GIT_TERMINAL_PROMPT=0`, `GH_PROMPT_DISABLED=1` prevent stalls |
+
+## Project structure
+
+```
+src/
+  index.ts        Server setup, probe-then-register flow, stdio transport
+  executor.ts     execFile wrapper with timeout, stdin, output cap
+  allowlist.ts    Allowed subcommand sets for git and gh
+  probe.ts        Startup probes for binaries, identity, SSH, gh auth
+  doctor.ts       Doctor tool registration and diagnostic formatting
+dist/
+  mcp-unsandboxed-git-cli   Compiled standalone binary
+```
+
+## License
+
+MIT
