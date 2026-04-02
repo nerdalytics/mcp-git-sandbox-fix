@@ -10,6 +10,7 @@ import { textResult } from "./format.js";
 import { runAllProbes } from "./probe.js";
 import { registerDoctorTool } from "./doctor.js";
 import { registerOnboardTool } from "./onboard.js";
+import { parseArgs } from "./config.js";
 
 const server = new McpServer({
   name: "mcp-unsandboxed-git-cli",
@@ -40,6 +41,15 @@ function execResult(tool: string, result: { stdout: string; stderr: string; exit
 }
 
 async function main() {
+  const config = parseArgs(process.argv);
+
+  // --gh-user arg acts as a fallback for MCP_GH_USER env.
+  // Args take precedence only when the env var is not set,
+  // so env-based config (the existing pattern) still wins.
+  if (config.ghUser && !process.env.MCP_GH_USER) {
+    process.env.MCP_GH_USER = config.ghUser;
+  }
+
   // Disable terminal prompts in child processes — prevents git/gh
   // from hanging when they try to prompt for credentials interactively.
   process.env.GIT_TERMINAL_PROMPT = "0";
@@ -80,6 +90,9 @@ async function main() {
       const denied = validateSubcommand(subcommand, GIT_ALLOWED_SUBCOMMANDS);
       if (denied) return denied;
 
+      const effectiveCwd = cwd || config.cwd || undefined;
+      const effectiveTimeout = timeout_ms ?? config.gitTimeout ?? undefined;
+
       // Detect whether this commit should be signed so we can verify afterward.
       // git silently produces unsigned commits when signing fails, so we
       // check the raw commit object post-commit to catch that.
@@ -90,7 +103,7 @@ async function main() {
       if (isCommit) {
         const gpgsignCheck = await execCommand("git", {
           args: ["config", "commit.gpgsign"],
-          cwd,
+          cwd: effectiveCwd,
           timeout_ms: 5000,
         });
         signingExpected =
@@ -101,9 +114,9 @@ async function main() {
 
       const result = await execCommand("git", {
         args,
-        cwd,
+        cwd: effectiveCwd,
         stdin,
-        timeout_ms,
+        timeout_ms: effectiveTimeout,
       });
 
       if (result.exitCode !== 0) {
@@ -117,14 +130,14 @@ async function main() {
       if (isCommit && signingExpected) {
         const rawCheck = await execCommand("git", {
           args: ["show", "-s", "--format=raw", "HEAD"],
-          cwd,
+          cwd: effectiveCwd,
           timeout_ms: 5000,
         });
 
         if (!rawCheck.stdout.includes("gpgsig ")) {
           const signingKey = await execCommand("git", {
             args: ["config", "user.signingkey"],
-            cwd,
+            cwd: effectiveCwd,
             timeout_ms: 5000,
           });
           const keyPath =
@@ -181,16 +194,21 @@ async function main() {
         const denied = validateSubcommand(args[0], GH_ALLOWED_SUBCOMMANDS);
         if (denied) return denied;
 
-        const result = await execCommand("gh", { args, cwd, stdin, timeout_ms });
+        const result = await execCommand("gh", {
+          args,
+          cwd: cwd || config.cwd || undefined,
+          stdin,
+          timeout_ms: timeout_ms ?? config.ghTimeout ?? undefined,
+        });
         return execResult("gh", result);
       },
     );
   }
 
-  registerDoctorTool(server, probes, ghRegistered);
+  registerDoctorTool(server, probes, ghRegistered, config);
 
   const binaryPath = process.execPath;
-  registerOnboardTool(server, binaryPath, probes);
+  registerOnboardTool(server, binaryPath, probes, config);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

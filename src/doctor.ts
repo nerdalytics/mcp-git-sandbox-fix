@@ -1,8 +1,9 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ProbeResults } from "./probe.js";
+import type { ServerConfig } from "./config.js";
 import { check, textResult } from "./format.js";
 
-function formatReport(probes: ProbeResults, ghRegistered: boolean): string {
+function formatReport(probes: ProbeResults, ghRegistered: boolean, config: ServerConfig): string {
   const lines: string[] = [];
   const recommendations: string[] = [];
 
@@ -19,6 +20,13 @@ function formatReport(probes: ProbeResults, ghRegistered: boolean): string {
   lines.push(
     `  GH_CONFIG_DIR: ${probes.env.ghConfigDir ?? "(not set)"}`,
   );
+  lines.push("");
+
+  lines.push("## CLI Args");
+  lines.push(`  --cwd: ${config.cwd ?? "(not set — using process.cwd)"}`);
+  lines.push(`  --git-timeout: ${config.gitTimeout ?? "(default 60000)"}`);
+  lines.push(`  --gh-timeout: ${config.ghTimeout ?? "(default 60000)"}`);
+  lines.push(`  --gh-user: ${config.ghUser ?? "(not set)"}`);
   lines.push("");
 
   lines.push("## Binaries");
@@ -268,6 +276,7 @@ export function registerDoctorTool(
   server: McpServer,
   probes: ProbeResults,
   ghRegistered: boolean,
+  config: ServerConfig,
 ): void {
   server.registerTool(
     "doctor",
@@ -279,7 +288,7 @@ export function registerDoctorTool(
         "and actionable recommendations for fixing configuration issues.",
     },
     async () => {
-      return textResult(formatReport(probes, ghRegistered));
+      return textResult(formatReport(probes, ghRegistered, config));
     },
   );
 }

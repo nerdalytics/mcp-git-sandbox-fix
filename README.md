@@ -84,6 +84,23 @@ Alternatively, add a `.mcp.json` at the project root -- useful for sharing the c
 }
 ```
 
+### Make the tools discoverable
+
+Claude Code loads MCP tools lazily -- they don't appear until you search for them. To make sure agents reach for these tools instead of Bash, add the following to your project's `CLAUDE.md` or `AGENTS.md`:
+
+```markdown
+## Git and gh run outside the sandbox
+
+SSH signing and TLS break inside the macOS sandbox. This project has an MCP server that sidesteps that. Use these instead of Bash for all git/gh work:
+
+- `mcp__mcp-git-sandbox-fix__git` -- git with working SSH signing
+- `mcp__mcp-git-sandbox-fix__gh` -- gh with working TLS
+
+Both are deferred tools. ToolSearch them before first use.
+```
+
+This works with any agent that reads `CLAUDE.md` or `AGENTS.md` -- symlink one to the other if you want to stay agent-agnostic.
+
 ### gh authentication priority
 
 When multiple auth variables are set, the server uses the first match:

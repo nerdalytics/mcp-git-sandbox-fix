@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ProbeResults } from "./probe.js";
+import type { ServerConfig } from "./config.js";
 import { z } from "zod";
 import { check, textResult } from "./format.js";
 
@@ -85,44 +86,102 @@ function buildSurvey(
     lines.push("  \u2014 gh not found");
   }
 
-  // Questions
-  lines.push("");
-  lines.push("## Setup Questions");
-  lines.push("");
-  lines.push("Ask the user these questions to determine their configuration:");
-  lines.push("");
-  lines.push("1. **Scope**: Should this be a global config (all projects) or project-specific?");
-  lines.push("   \u2192 global: generates JSON for ~/.claude.json or `claude mcp add -s user` command");
-  lines.push("   \u2192 project: generates .mcp.json for the project root");
-  lines.push("");
+  // Build structured questions for AskUserQuestion tool
+  interface SurveyOption {
+    label: string;
+    description: string;
+  }
+  interface SurveyQuestion {
+    question: string;
+    header: string;
+    options: SurveyOption[];
+    multiSelect: boolean;
+    maps_to: string;
+  }
+
+  const questions: SurveyQuestion[] = [];
+
+  questions.push({
+    question: "Should this MCP server be configured globally or per-project?",
+    header: "Scope",
+    options: [
+      { label: "Global (Recommended)", description: "Adds to ~/.claude.json — available in all projects" },
+      { label: "Project", description: "Creates .mcp.json in the project root — shareable with collaborators" },
+    ],
+    multiSelect: false,
+    maps_to: "scope",
+  });
 
   if (probes.ssh.found) {
-    lines.push("2. **SSH**: Do you need SSH-based git operations (push/pull over SSH, SSH commit signing)?");
-    lines.push("   \u2192 If yes: SSH_AUTH_SOCK will be forwarded");
-    if (!probes.sshAgent.socketSet) {
-      lines.push(
-        "   \u26a0 SSH_AUTH_SOCK is not currently set in the server environment",
-      );
-    }
-    lines.push("");
+    const sshDesc = probes.sshAgent.socketSet
+      ? "Forward SSH_AUTH_SOCK so the server can reach your keys"
+      : "Forward SSH_AUTH_SOCK (not currently set in the server environment)";
+    questions.push({
+      question: "Do you need SSH-based git operations?",
+      header: "SSH",
+      options: [
+        { label: "Yes (Recommended)", description: sshDesc },
+        { label: "No", description: "HTTPS-only git operations, no commit signing" },
+      ],
+      multiSelect: false,
+      maps_to: "ssh",
+    });
   }
 
   if (probes.gh.found) {
-    lines.push("3. **GitHub CLI**: Do you need gh for PRs, issues, releases?");
-    lines.push("   \u2192 If yes, which auth method?");
-    lines.push(
-      '   \u2192 a) MCP_GH_USER: specify your account name (recommended for SSO / multi-account)',
-    );
-    lines.push("   \u2192 b) GH_TOKEN: provide a personal access token");
-    lines.push(
-      "   \u2192 c) GH_CONFIG_DIR: point to a gh config directory",
-    );
-    lines.push("");
+    questions.push({
+      question: "Do you need the GitHub CLI (gh) for PRs, issues, releases?",
+      header: "GitHub CLI",
+      options: [
+        { label: "MCP_GH_USER (Recommended)", description: "Specify your GitHub username — best for SSO and multi-account setups" },
+        { label: "GH_TOKEN", description: "Use a personal access token directly" },
+        { label: "GH_CONFIG_DIR", description: "Point to a gh config directory with stored credentials" },
+        { label: "No gh", description: "Skip GitHub CLI — git only" },
+      ],
+      multiSelect: false,
+      maps_to: "gh_method",
+    });
   }
 
-  lines.push(
-    `Then call this tool again with the setup parameter to generate the config.`,
-  );
+  questions.push({
+    question: "Where should tool hints go so agents find the MCP tools instead of using Bash?",
+    header: "Agent file",
+    options: [
+      { label: "AGENTS.md", description: "Agent-agnostic — symlink CLAUDE.md to it" },
+      { label: "CLAUDE.md", description: "Claude Code default" },
+      { label: "Both", description: "Separate CLAUDE.md and AGENTS.md files" },
+      { label: "Skip", description: "I'll handle it myself" },
+    ],
+    multiSelect: false,
+    maps_to: "agent_file",
+  });
+
+  lines.push("");
+  lines.push("## Setup Questions");
+  lines.push("");
+  lines.push("Present these to the user using the AskUserQuestion tool.");
+  lines.push("AskUserQuestion supports up to 4 questions per call, so batch them.");
+  lines.push("If the user picks MCP_GH_USER or GH_TOKEN or GH_CONFIG_DIR,");
+  lines.push("ask a follow-up for the value (username, token, or path).");
+  lines.push("");
+  lines.push("```json");
+  lines.push(JSON.stringify(questions, null, 2));
+  lines.push("```");
+  lines.push("");
+  lines.push("## Mapping answers to setup parameters");
+  lines.push("");
+  lines.push("Once you have the answers, call this tool again with the setup parameter.");
+  lines.push("Map answers as follows:");
+  lines.push('  Scope: "Global" -> scope: "user", "Project" -> scope: "project"');
+  lines.push('  SSH: "Yes" -> ssh: true, "No" -> ssh: false');
+  lines.push('  GitHub CLI: "MCP_GH_USER" -> gh_method: "user", gh_value: <username>');
+  lines.push('              "GH_TOKEN" -> gh_method: "token", gh_value: <token>');
+  lines.push('              "GH_CONFIG_DIR" -> gh_method: "config-dir", gh_value: <path>');
+  lines.push('              "No gh" -> omit gh_method and gh_value');
+  lines.push('  Agent file: "AGENTS.md" -> agent_file: "agents"');
+  lines.push('              "CLAUDE.md" -> agent_file: "claude"');
+  lines.push('              "Both" -> agent_file: "both"');
+  lines.push('              "Skip" -> agent_file: "skip"');
   lines.push("");
   lines.push("## Binary Path");
   lines.push(`  ${binaryPath}`);
@@ -132,6 +191,7 @@ function buildSurvey(
 
 interface McpServerConfig {
   command: string;
+  args?: string[];
   env?: Record<string, string>;
 }
 
@@ -140,6 +200,10 @@ interface SetupInput {
   ssh: boolean;
   gh_method?: string;
   gh_value?: string;
+  agent_file?: string;
+  cwd?: string;
+  git_timeout?: number;
+  gh_timeout?: number;
 }
 
 function buildConfig(
@@ -148,6 +212,7 @@ function buildConfig(
 ): string {
   const lines: string[] = [];
   const env: Record<string, string> = {};
+  const args: string[] = [];
 
   if (setup.ssh) {
     env["SSH_AUTH_SOCK"] = "${SSH_AUTH_SOCK}";
@@ -158,11 +223,28 @@ function buildConfig(
     token: "GH_TOKEN",
     "config-dir": "GH_CONFIG_DIR",
   };
-  if (setup.gh_method && setup.gh_value && ghEnvKey[setup.gh_method]) {
+
+  // gh auth: prefer --gh-user arg for non-secret values, env for tokens
+  if (setup.gh_method === "user" && setup.gh_value) {
+    args.push("--gh-user", setup.gh_value);
+  } else if (setup.gh_method && setup.gh_value && ghEnvKey[setup.gh_method]) {
     env[ghEnvKey[setup.gh_method]] = setup.gh_value;
   }
 
+  if (setup.cwd) {
+    args.push("--cwd", setup.cwd);
+  }
+  if (setup.git_timeout) {
+    args.push("--git-timeout", String(setup.git_timeout));
+  }
+  if (setup.gh_timeout) {
+    args.push("--gh-timeout", String(setup.gh_timeout));
+  }
+
   const serverConfig: McpServerConfig = { command: binaryPath };
+  if (args.length > 0) {
+    serverConfig.args = args;
+  }
   if (Object.keys(env).length > 0) {
     serverConfig.env = env;
   }
@@ -194,13 +276,17 @@ function buildConfig(
     }
     cliParts.push("mcp-unsandboxed-git-cli");
     cliParts.push(binaryPath);
+    if (args.length > 0) {
+      cliParts.push("--");
+      cliParts.push(...args);
+    }
 
     // Also show the JSON for manual editing
     const claudeJson = {
       "mcp-unsandboxed-git-cli": {
         type: "stdio" as const,
         command: binaryPath,
-        args: [] as string[],
+        args,
         env,
       },
     };
@@ -223,6 +309,40 @@ function buildConfig(
   lines.push("");
   lines.push("After applying, restart the MCP server and run the `doctor` tool to verify.");
 
+  const agentFile = setup.agent_file ?? "skip";
+  if (agentFile !== "skip") {
+    const snippet = [
+      "## Git and gh run outside the sandbox",
+      "",
+      "SSH signing and TLS break inside the macOS sandbox. This project has an MCP",
+      "server that sidesteps that. Use these instead of Bash for all git/gh work:",
+      "",
+      "- `mcp__mcp-git-sandbox-fix__git` \u2014 git with working SSH signing",
+      "- `mcp__mcp-git-sandbox-fix__gh` \u2014 gh with working TLS",
+      "",
+      "Both are deferred tools. ToolSearch them before first use.",
+    ].join("\n");
+
+    const files: string[] = [];
+    if (agentFile === "claude" || agentFile === "both") files.push("CLAUDE.md");
+    if (agentFile === "agents" || agentFile === "both") files.push("AGENTS.md");
+
+    lines.push("");
+    lines.push("## Make the tools discoverable");
+    lines.push("");
+    lines.push(`Add the following to ${files.join(" and ")} in your project root:`);
+    lines.push("");
+    lines.push("```markdown");
+    lines.push(snippet);
+    lines.push("```");
+
+    if (agentFile === "agents") {
+      lines.push("");
+      lines.push("Symlink CLAUDE.md to AGENTS.md so Claude Code picks it up too:");
+      lines.push("  ln -s AGENTS.md CLAUDE.md");
+    }
+  }
+
   return lines.join("\n");
 }
 
@@ -230,6 +350,7 @@ export function registerOnboardTool(
   server: McpServer,
   binaryPath: string,
   probes: ProbeResults,
+  config: ServerConfig,
 ): void {
   server.registerTool(
     "onboard",
@@ -255,6 +376,22 @@ export function registerOnboardTool(
               .string()
               .optional()
               .describe("Value for the chosen gh auth method (username, token, or path)"),
+            agent_file: z
+              .enum(["claude", "agents", "both", "skip"])
+              .optional()
+              .describe("Which file to add tool hints to: claude (CLAUDE.md), agents (AGENTS.md), both, or skip"),
+            cwd: z
+              .string()
+              .optional()
+              .describe("Default working directory for all commands (--cwd)"),
+            git_timeout: z
+              .number()
+              .optional()
+              .describe("Default timeout in ms for git operations (--git-timeout)"),
+            gh_timeout: z
+              .number()
+              .optional()
+              .describe("Default timeout in ms for gh operations (--gh-timeout)"),
           })
           .optional()
           .describe(
