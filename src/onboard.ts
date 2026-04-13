@@ -255,7 +255,7 @@ function buildConfig(
     // .mcp.json format
     const mcpJson = {
       mcpServers: {
-        "mcp-unsandboxed-git-cli": serverConfig,
+        "mcp-sandboxed-git-gh-cli": serverConfig,
       },
     };
 
@@ -274,7 +274,7 @@ function buildConfig(
     for (const [key, value] of Object.entries(env)) {
       cliParts.push(`-e ${key}='${value}'`);
     }
-    cliParts.push("mcp-unsandboxed-git-cli");
+    cliParts.push("mcp-sandboxed-git-gh-cli");
     cliParts.push(binaryPath);
     if (args.length > 0) {
       cliParts.push("--");
@@ -283,7 +283,7 @@ function buildConfig(
 
     // Also show the JSON for manual editing
     const claudeJson = {
-      "mcp-unsandboxed-git-cli": {
+      "mcp-sandboxed-git-gh-cli": {
         type: "stdio" as const,
         command: binaryPath,
         args,
@@ -317,8 +317,8 @@ function buildConfig(
       "SSH signing and TLS break inside the macOS sandbox. This project has an MCP",
       "server that sidesteps that. Use these instead of Bash for all git/gh work:",
       "",
-      "- `mcp__mcp-git-sandbox-fix__git` \u2014 git with working SSH signing",
-      "- `mcp__mcp-git-sandbox-fix__gh` \u2014 gh with working TLS",
+      "- `mcp__mcp-sandboxed-git-gh-cli__git` \u2014 git with working SSH signing",
+      "- `mcp__mcp-sandboxed-git-gh-cli__gh` \u2014 gh with working TLS",
       "",
       "Both are deferred tools. ToolSearch them before first use.",
     ].join("\n");

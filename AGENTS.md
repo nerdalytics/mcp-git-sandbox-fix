@@ -1,4 +1,4 @@
-# mcp-unsandboxed-git-cli
+# mcp-sandboxed-git-gh-cli
 
 MCP server that exposes `git` and `gh` CLI tools outside Claude Code's sandbox, enabling SSH signing, full TLS, and stdin-based commit messages.
 
@@ -27,10 +27,10 @@ MCP server that exposes `git` and `gh` CLI tools outside Claude Code's sandbox, 
 | `.mcp.json` | MCP server config pointing to compiled binary |
 | `mise.local.toml` | Local tooling (Bun version) and gh auth hook |
 
-<!--— MCP-UNSANDBOXED-GIT-START —>[Project Index]
+<!--— MCP-SANDBOXED-GIT-GH-CLI-START —>[Project Index]
 |root: .
 |IMPORTANT: This is a security-sensitive project — changes to allowlist.ts expand attack surface
 |src:{*.ts}
 |config:{package.json,tsconfig.json,.mcp.json,mise.local.toml}
-|dist:{mcp-unsandboxed-git-cli}
-<!--— MCP-UNSANDBOXED-GIT-END —>
+|dist:{mcp-sandboxed-git-gh-cli}
+<!--— MCP-SANDBOXED-GIT-GH-CLI-END —>

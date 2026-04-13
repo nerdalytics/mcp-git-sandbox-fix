@@ -1,0 +1,14 @@
+{
+	"mcpServers": {
+		"mcp-sandboxed-git-gh-cli": {
+			"type": "stdio",
+			"command": "$PWD/dist/mcp-sandboxed-git-gh-cli",
+			"args": [],
+			"env": {
+				"SSH_AUTH_SOCK": "${SSH_AUTH_SOCK}",
+				"GH_HOST": "github.com",
+				"GH_CONFIG_DIR": "$HOME/.config/gh"
+			}
+		}
+	}
+}
