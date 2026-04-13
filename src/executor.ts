@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { DEFAULT_TIMEOUT_MS } from "./constants.js";
 
 export interface ExecOptions {
   args: string[];
@@ -15,7 +16,6 @@ export interface ExecResult {
   errorCode?: string; // 'ENOENT', 'ETIMEDOUT', etc.
 }
 
-const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_OUTPUT_BYTES = 1_000_000;
 
 export function execCommand(
@@ -43,17 +43,10 @@ export function execCommand(
         let exitCode = 0;
         let errorCode: string | undefined;
 
-        if (error && "code" in error && typeof error.code === "string") {
-          errorCode = error.code;
-          exitCode = 1;
-        } else if (
-          error &&
-          "code" in error &&
-          typeof error.code === "number"
-        ) {
-          exitCode = error.code;
-        } else if (error) {
-          exitCode = 1;
+        if (error) {
+          const code = "code" in error ? error.code : undefined;
+          errorCode = typeof code === "string" ? code : undefined;
+          exitCode = typeof code === "number" ? code : 1;
         }
 
         resolve({
