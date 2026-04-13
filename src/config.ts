@@ -7,7 +7,7 @@ export interface ServerConfig {
 
 function usage(): string {
   return [
-    "Usage: mcp-git-sandbox-fix [options]",
+    "Usage: mcp-sandboxed-git-gh-cli [options]",
     "",
     "Options:",
     "  --cwd <path>           Default working directory for all commands",

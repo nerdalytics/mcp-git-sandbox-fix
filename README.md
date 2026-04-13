@@ -1,4 +1,4 @@
-# mcp-unsandboxed-git-cli
+# mcp-sandboxed-git-gh-cli
 
 An MCP server that runs `git` and `gh` CLI commands **outside** Claude Code's macOS sandbox, working around known sandbox bugs that break:
 
@@ -19,8 +19,8 @@ The server progressively discloses tools based on what you configure. Only `git`
 No env vars needed. The MCP SDK passes `HOME` and `PATH` by default, which is enough for local git operations (status, log, diff, add, commit, branch, etc.).
 
 ```sh
-claude mcp add -s user -t stdio mcp-unsandboxed-git-cli \
-  /absolute/path/to/dist/mcp-unsandboxed-git-cli
+claude mcp add -s user -t stdio mcp-sandboxed-git-gh-cli \
+  /absolute/path/to/dist/mcp-sandboxed-git-gh-cli
 ```
 
 ### git + SSH
@@ -28,9 +28,9 @@ claude mcp add -s user -t stdio mcp-unsandboxed-git-cli \
 Required for `git push`/`pull` over SSH and SSH commit signing. Forward the SSH agent socket so the server can reach your keys.
 
 ```sh
-claude mcp add -s user -t stdio mcp-unsandboxed-git-cli \
+claude mcp add -s user -t stdio mcp-sandboxed-git-gh-cli \
   -e SSH_AUTH_SOCK='${SSH_AUTH_SOCK}' \
-  /absolute/path/to/dist/mcp-unsandboxed-git-cli
+  /absolute/path/to/dist/mcp-sandboxed-git-gh-cli
 ```
 
 ### git + gh (with account selection)
@@ -40,10 +40,10 @@ The `gh` tool is only registered when you explicitly configure authentication. T
 **Recommended: select a specific gh account (works with SSO and multi-account setups):**
 
 ```sh
-claude mcp add -s user -t stdio mcp-unsandboxed-git-cli \
+claude mcp add -s user -t stdio mcp-sandboxed-git-gh-cli \
   -e SSH_AUTH_SOCK='${SSH_AUTH_SOCK}' \
   -e MCP_GH_USER=your-github-username \
-  /absolute/path/to/dist/mcp-unsandboxed-git-cli
+  /absolute/path/to/dist/mcp-sandboxed-git-gh-cli
 ```
 
 At startup the server runs `gh auth token --user <value>` to resolve the account's token from your local gh credential store. No global state is mutated -- the token is extracted and used for this server session only.
@@ -51,19 +51,19 @@ At startup the server runs `gh auth token --user <value>` to resolve the account
 **Alternative: use a personal access token directly:**
 
 ```sh
-claude mcp add -s user -t stdio mcp-unsandboxed-git-cli \
+claude mcp add -s user -t stdio mcp-sandboxed-git-gh-cli \
   -e SSH_AUTH_SOCK='${SSH_AUTH_SOCK}' \
   -e GH_TOKEN=ghp_... \
-  /absolute/path/to/dist/mcp-unsandboxed-git-cli
+  /absolute/path/to/dist/mcp-sandboxed-git-gh-cli
 ```
 
 **Alternative: point to a gh config directory:**
 
 ```sh
-claude mcp add -s user -t stdio mcp-unsandboxed-git-cli \
+claude mcp add -s user -t stdio mcp-sandboxed-git-gh-cli \
   -e SSH_AUTH_SOCK='${SSH_AUTH_SOCK}' \
   -e GH_CONFIG_DIR='${HOME}/.config/gh' \
-  /absolute/path/to/dist/mcp-unsandboxed-git-cli
+  /absolute/path/to/dist/mcp-sandboxed-git-gh-cli
 ```
 
 `claude mcp add` writes to `~/.claude.json` (user scope) or `.claude.json` in the project root (project scope).
@@ -73,8 +73,8 @@ Alternatively, add a `.mcp.json` at the project root -- useful for sharing the c
 ```json
 {
   "mcpServers": {
-    "mcp-unsandboxed-git-cli": {
-      "command": "/absolute/path/to/dist/mcp-unsandboxed-git-cli",
+    "mcp-sandboxed-git-gh-cli": {
+      "command": "/absolute/path/to/dist/mcp-sandboxed-git-gh-cli",
       "env": {
         "SSH_AUTH_SOCK": "${SSH_AUTH_SOCK}",
         "MCP_GH_USER": "your-github-username"
@@ -93,8 +93,8 @@ Claude Code loads MCP tools lazily -- they don't appear until you search for the
 
 SSH signing and TLS break inside the macOS sandbox. This project has an MCP server that sidesteps that. Use these instead of Bash for all git/gh work:
 
-- `mcp__mcp-git-sandbox-fix__git` -- git with working SSH signing
-- `mcp__mcp-git-sandbox-fix__gh` -- gh with working TLS
+- `mcp__mcp-sandboxed-git-gh-cli__git` -- git with working SSH signing
+- `mcp__mcp-sandboxed-git-gh-cli__gh` -- gh with working TLS
 
 Both are deferred tools. ToolSearch them before first use.
 ```
@@ -186,7 +186,7 @@ bun install
 bun run build
 ```
 
-Produces a standalone executable at `dist/mcp-unsandboxed-git-cli` (~66 MB). The binary is large because `bun build --compile` embeds the entire Bun runtime (JavaScriptCore engine, Node.js API compatibility, crypto, etc.). The actual application code is a few hundred KB -- the rest is the runtime. The tradeoff: no runtime dependencies needed on the target machine.
+Produces a standalone executable at `dist/mcp-sandboxed-git-gh-cli` (~66 MB). The binary is large because `bun build --compile` embeds the entire Bun runtime (JavaScriptCore engine, Node.js API compatibility, crypto, etc.). The actual application code is a few hundred KB -- the rest is the runtime. The tradeoff: no runtime dependencies needed on the target machine.
 
 ## Run (development)
 
@@ -200,7 +200,7 @@ bun run start
 
 ```sh
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0.1.0"}}}' \
-  | ./dist/mcp-unsandboxed-git-cli
+  | ./dist/mcp-sandboxed-git-gh-cli
 ```
 
 ### Run the doctor tool
@@ -210,7 +210,7 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0.1.0"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"doctor","arguments":{}}}' \
-  | ./dist/mcp-unsandboxed-git-cli
+  | ./dist/mcp-sandboxed-git-gh-cli
 ```
 
 ### Test allowlist rejection
@@ -220,10 +220,10 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0.1.0"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"git","arguments":{"args":["daemon"]}}}' \
-  | ./dist/mcp-unsandboxed-git-cli
+  | ./dist/mcp-sandboxed-git-gh-cli
 ```
 
-Replace `./dist/mcp-unsandboxed-git-cli` with `bun run src/index.ts` for development testing.
+Replace `./dist/mcp-sandboxed-git-gh-cli` with `bun run src/index.ts` for development testing.
 
 ## Security
 
@@ -248,7 +248,7 @@ src/
   probe.ts        Startup probes for binaries, identity, SSH, gh auth
   doctor.ts       Doctor tool registration and diagnostic formatting
 dist/
-  mcp-unsandboxed-git-cli   Compiled standalone binary
+  mcp-sandboxed-git-gh-cli   Compiled standalone binary
 ```
 
 ## License
