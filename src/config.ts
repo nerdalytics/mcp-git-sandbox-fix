@@ -19,11 +19,10 @@ function usage(): string {
 }
 
 export function parseArgs(argv: string[]): ServerConfig {
-  // Skip runtime and script entries.
-  // Bun compiled binary: argv[0] is the binary path, args start at [1].
-  // bun run src/index.ts: argv[0] is bun, argv[1] is the script, args start at [2].
-  const isBunRun = argv[0]?.includes("bun") && argv[1]?.endsWith(".ts");
-  const args = argv.slice(isBunRun ? 2 : 1);
+  // Skip runtime and script entries. Both Bun modes have a 2-entry preamble:
+  //   bun run src/index.ts    → argv = [bun,     src/index.ts,              ...user]
+  //   compiled Bun binary     → argv = [binPath, /$bunfs/root/<entry>,      ...user]
+  const args = argv.slice(2);
 
   const config: ServerConfig = {
     cwd: null,
