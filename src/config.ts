@@ -1,3 +1,5 @@
+import { DEFAULT_TIMEOUT_MS } from "./constants.js";
+
 export interface ServerConfig {
   cwd: string | null;
   gitTimeout: number | null;
@@ -5,23 +7,39 @@ export interface ServerConfig {
   ghUser: string | null;
 }
 
+interface FlagDef {
+  field: keyof ServerConfig;
+  label: string;
+  parse?: (value: string, flag: string) => number;
+}
+
+function parseTimeout(value: string, flag: string): number {
+  const n = parseInt(value, 10);
+  if (Number.isNaN(n)) throw new Error(`${flag}: "${value}" is not a number`);
+  return n;
+}
+
+const FLAGS: Record<string, FlagDef> = {
+  "--cwd": { field: "cwd", label: "a path" },
+  "--git-timeout": { field: "gitTimeout", label: "a number", parse: parseTimeout },
+  "--gh-timeout": { field: "ghTimeout", label: "a number", parse: parseTimeout },
+  "--gh-user": { field: "ghUser", label: "a username" },
+};
+
 function usage(): string {
   return [
     "Usage: mcp-sandboxed-git-gh-cli [options]",
     "",
     "Options:",
     "  --cwd <path>           Default working directory for all commands",
-    "  --git-timeout <ms>     Default timeout for git operations (default: 60000)",
-    "  --gh-timeout <ms>      Default timeout for gh operations (default: 60000)",
+    `  --git-timeout <ms>     Default timeout for git operations (default: ${DEFAULT_TIMEOUT_MS})`,
+    `  --gh-timeout <ms>      Default timeout for gh operations (default: ${DEFAULT_TIMEOUT_MS})`,
     "  --gh-user <name>       GitHub username for gh auth (alternative to MCP_GH_USER env)",
     "  --help                 Show this help",
   ].join("\n");
 }
 
 export function parseArgs(argv: string[]): ServerConfig {
-  // Skip runtime and script entries. Both Bun modes have a 2-entry preamble:
-  //   bun run src/index.ts    → argv = [bun,     src/index.ts,              ...user]
-  //   compiled Bun binary     → argv = [binPath, /$bunfs/root/<entry>,      ...user]
   const args = argv.slice(2);
 
   const config: ServerConfig = {
@@ -33,38 +51,24 @@ export function parseArgs(argv: string[]): ServerConfig {
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    const next = args[i + 1];
 
-    switch (arg) {
-      case "--cwd":
-        if (!next) throw new Error("--cwd requires a path");
-        config.cwd = next;
-        i++;
-        break;
-      case "--git-timeout":
-        if (!next) throw new Error("--git-timeout requires a number");
-        config.gitTimeout = parseInt(next, 10);
-        if (Number.isNaN(config.gitTimeout)) throw new Error(`--git-timeout: "${next}" is not a number`);
-        i++;
-        break;
-      case "--gh-timeout":
-        if (!next) throw new Error("--gh-timeout requires a number");
-        config.ghTimeout = parseInt(next, 10);
-        if (Number.isNaN(config.ghTimeout)) throw new Error(`--gh-timeout: "${next}" is not a number`);
-        i++;
-        break;
-      case "--gh-user":
-        if (!next) throw new Error("--gh-user requires a username");
-        config.ghUser = next;
-        i++;
-        break;
-      case "--help":
-        console.error(usage());
-        process.exit(0);
-        break;
-      default:
-        throw new Error(`Unknown argument: ${arg}\n\n${usage()}`);
+    if (arg === "--help") {
+      console.error(usage());
+      process.exit(0);
     }
+
+    const def = FLAGS[arg];
+    if (!def) {
+      throw new Error(`Unknown argument: ${arg}\n\n${usage()}`);
+    }
+
+    const next = args[i + 1];
+    if (!next) throw new Error(`${arg} requires ${def.label}`);
+
+    (config as Record<string, unknown>)[def.field] = def.parse
+      ? def.parse(next, arg)
+      : next;
+    i++;
   }
 
   return config;
