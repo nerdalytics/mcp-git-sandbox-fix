@@ -127,7 +127,7 @@ Only include variables that are set in your environment -- unset `${VAR}` refere
 
 ### `git`
 
-Always available. Run any allowlisted git subcommand.
+Always available. Run git subcommands allowed by the active security policy.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -136,11 +136,11 @@ Always available. Run any allowlisted git subcommand.
 | `stdin` | `string` | No | Text piped to stdin (use with `git commit -F -`) |
 | `timeout_ms` | `number` | No | Timeout in ms (default 60000) |
 
-**Allowed subcommands:** `status`, `log`, `diff`, `show`, `branch`, `tag`, `remote`, `rev-parse`, `ls-files`, `ls-remote`, `blame`, `shortlog`, `describe`, `config`, `stash`, `add`, `reset`, `restore`, `rm`, `commit`, `merge`, `rebase`, `cherry-pick`, `revert`, `checkout`, `switch`, `fetch`, `pull`, `push`, `clone`, `clean`, `gc`, `init`, `worktree`
+Some subcommands have restricted flags under the default policy. See [Security policy](#security-policy) for the full table.
 
 ### `gh`
 
-Available only when gh authentication is configured. Run any allowlisted GitHub CLI subcommand.
+Available only when gh authentication is configured. Run gh subcommands allowed by the active security policy.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -149,7 +149,7 @@ Available only when gh authentication is configured. Run any allowlisted GitHub 
 | `stdin` | `string` | No | Text piped to stdin |
 | `timeout_ms` | `number` | No | Timeout in ms (default 60000) |
 
-**Allowed subcommands:** `pr`, `issue`, `repo`, `release`, `run`, `workflow`, `api`, `status`, `search`, `label`, `project`, `variable`, `secret`, `auth`, `browse`, `gist`, `codespace`, `cache`, `ruleset`, `attestation`
+Some subcommands have restricted actions under the default policy. See [Security policy](#security-policy) for the full table.
 
 ### `doctor`
 
@@ -225,28 +225,201 @@ printf '%s\n' \
 
 Replace `./dist/mcp-sandboxed-git-gh-cli` with `bun run src/index.ts` for development testing.
 
-## Security
+## Security policy
 
-Commands are executed with `child_process.execFile` (no shell). Arguments are passed as an array, so shell metacharacters like `;`, `&&`, `$()`, and backticks are treated as literal strings -- no command injection is possible.
+Commands run via `execFile` (no shell). Arguments are passed as an array, so shell metacharacters like `;`, `&&`, `$()`, and backticks are treated as literal strings -- no command injection is possible.
+
+Beyond that, the server enforces a **configurable security policy** that validates git/gh arguments per subcommand. The default policy is secure out of the box. Users can widen permissions by supplying a custom policy file via `--policy <path>`.
 
 | Layer | Mechanism |
 |-------|-----------|
 | No shell | `execFile` without `shell: true` -- args are an array, not a parsed string |
-| Subcommand allowlist | First arg must be in the known set (`src/allowlist.ts`) |
+| Security policy | Per-subcommand argument validation (`src/policy.ts`, `src/sanitizer.ts`) |
+| Binary allowlist | Only `git`, `gh`, `ssh-keygen`, `ssh-add`, `ssh`, `gpg` can be executed |
+| cwd validation | System directories (`/etc`, `/System`, `/usr/lib`, `/usr/sbin`) are rejected |
+| Environment protection | Protected env vars (`PATH`, `LD_PRELOAD`, `GIT_SSH_COMMAND`, etc.) cannot be overridden |
 | Progressive disclosure | `gh` tool only exposed when auth is explicitly configured |
-| Output cap | 1 MB `maxBuffer` prevents memory exhaustion |
-| Timeout | 60s default prevents hanging processes |
+| Output sanitization | ANSI escape sequences stripped, output truncated at 1 MB |
+| Timeout | Clamped to 1s--5min range; `timeout_ms: 0` cannot disable the timeout |
+| stdin limit | 1 MB maximum to prevent memory exhaustion |
 | No interactive prompts | `GIT_TERMINAL_PROMPT=0`, `GH_PROMPT_DISABLED=1` prevent stalls |
+
+### Default policy
+
+The default policy ships with the server and is applied when no `--policy` flag is provided. Each subcommand is either unrestricted (`true`), disabled (`false`), or has specific constraints.
+
+**Rule types:**
+
+| Rule | Meaning |
+|------|---------|
+| `true` | Allowed, no restrictions on flags or arguments |
+| `false` | Blocked entirely |
+| `blockedFlags` | Specific flags are rejected (exact match and prefix match) |
+| `readOnly` | For `git config`: only read operations and writes to `safeWriteKeys`. For `gh api`: only GET requests |
+| `safeWriteKeys` | Config keys that are writable even in `readOnly` mode |
+| `requireDryRun` | `--dry-run` or `-n` must be present |
+| `allowedActions` | Only these `args[1]` values are permitted |
+| `blockedActions` | These `args[1]` values are rejected |
+| `blockedGlobalFlags` | Flags blocked regardless of subcommand (e.g., `git -c`) |
+
+#### Git subcommands
+
+| Subcommand | Rule | Details |
+|------------|------|---------|
+| `status` | `true` | |
+| `log` | `true` | |
+| `diff` | `true` | |
+| `show` | `true` | |
+| `branch` | `true` | |
+| `tag` | `true` | |
+| `remote` | `true` | |
+| `rev-parse` | `true` | |
+| `ls-files` | `true` | |
+| `ls-remote` | `true` | |
+| `blame` | `true` | |
+| `shortlog` | `true` | |
+| `describe` | `true` | |
+| `stash` | `true` | |
+| `gc` | `true` | |
+| `add` | `true` | |
+| `restore` | `true` | |
+| `rm` | `true` | |
+| `commit` | `true` | |
+| `merge` | `true` | |
+| `cherry-pick` | `true` | |
+| `revert` | `true` | |
+| `checkout` | `true` | |
+| `switch` | `true` | |
+| `init` | `true` | |
+| `worktree` | `true` | |
+| `config` | `readOnly` | Writes allowed only to: `user.name`, `user.email`, `commit.gpgsign`, `gpg.format`, `user.signingkey`, `tag.gpgsign`, `init.defaultBranch`, `push.autoSetupRemote` |
+| `rebase` | `blockedFlags` | `--exec` blocked (shell execution) |
+| `clone` | `blockedFlags` | `--upload-pack`, `--config`, `-c` blocked (arbitrary program execution) |
+| `fetch` | `blockedFlags` | `--upload-pack` blocked |
+| `pull` | `blockedFlags` | `--upload-pack` blocked |
+| `push` | `blockedFlags` | `--receive-pack` blocked |
+| `clean` | `requireDryRun` | `--dry-run` or `-n` required |
+| `reset` | `blockedFlags` | `--hard` blocked (destroys uncommitted work) |
+
+**Global:** `-c` flag blocked at top level (prevents `git -c core.hooksPath=... commit`)
+
+#### GH subcommands
+
+| Subcommand | Rule | Details |
+|------------|------|---------|
+| `pr` | `true` | |
+| `issue` | `true` | |
+| `run` | `true` | |
+| `status` | `true` | |
+| `search` | `true` | |
+| `label` | `true` | |
+| `project` | `true` | |
+| `cache` | `true` | |
+| `ruleset` | `true` | |
+| `attestation` | `true` | |
+| `auth` | `allowedActions` | Only `status` (blocks `token`, `login`, `logout`) |
+| `api` | `readOnly` | GET only; blocks `-X POST/PUT/PATCH/DELETE`, `-f`, `--input` |
+| `gist` | `blockedActions` | `create`, `edit`, `delete` blocked (data exfiltration) |
+| `repo` | `blockedActions` | `delete`, `archive`, `rename`, `edit`, `create` blocked |
+| `release` | `blockedActions` | `create`, `delete`, `edit`, `upload` blocked (supply chain) |
+| `workflow` | `blockedActions` | `run`, `enable`, `disable` blocked (CI dispatch) |
+| `secret` | `blockedActions` | `set`, `delete` blocked (CI poisoning) |
+| `variable` | `blockedActions` | `set`, `delete` blocked |
+| `codespace` | `false` | Disabled (remote shell access) |
+| `browse` | `false` | Disabled (opens browser, useless in MCP) |
+
+### Custom policy
+
+To override specific defaults, create a JSON file and pass it via `--policy`:
+
+```sh
+claude mcp add -s user -t stdio mcp-sandboxed-git-gh-cli \
+  /absolute/path/to/dist/mcp-sandboxed-git-gh-cli \
+  -- --policy /path/to/policy.json
+```
+
+Or in `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "mcp-sandboxed-git-gh-cli": {
+      "command": "/absolute/path/to/dist/mcp-sandboxed-git-gh-cli",
+      "args": ["--policy", "./security-policy.json"]
+    }
+  }
+}
+```
+
+The custom policy is **deep-merged** over the defaults -- you only need to specify the entries you want to change. Everything else keeps its default.
+
+**Examples:**
+
+Allow `git clean` without `--dry-run`:
+```json
+{
+  "git": { "subcommands": { "clean": true } }
+}
+```
+
+Allow `gh api` writes:
+```json
+{
+  "gh": { "subcommands": { "api": true } }
+}
+```
+
+Enable `gh codespace`:
+```json
+{
+  "gh": { "subcommands": { "codespace": true } }
+}
+```
+
+Allow `git config` to write any key:
+```json
+{
+  "git": { "subcommands": { "config": true } }
+}
+```
+
+Restrict `git config` writes to a custom set of keys:
+```json
+{
+  "git": {
+    "subcommands": {
+      "config": {
+        "readOnly": true,
+        "safeWriteKeys": ["user.name", "user.email", "core.autocrlf"]
+      }
+    }
+  }
+}
+```
+
+Remove the `-c` global flag restriction:
+```json
+{
+  "git": { "blockedGlobalFlags": [] }
+}
+```
 
 ## Project structure
 
 ```
 src/
-  index.ts        Server setup, probe-then-register flow, stdio transport
-  executor.ts     execFile wrapper with timeout, stdin, output cap
-  allowlist.ts    Allowed subcommand sets for git and gh
-  probe.ts        Startup probes for binaries, identity, SSH, gh auth
-  doctor.ts       Doctor tool registration and diagnostic formatting
+  index.ts          Server setup, probe-then-register flow, stdio transport
+  executor.ts       execFile wrapper with policy enforcement, timeout, stdin, output cap
+  policy.ts         SecurityPolicy types, DEFAULT_POLICY, load/merge
+  sanitizer.ts      Policy-driven argument validator (sanitizeArgs)
+  allowlist.ts      Derives allowed subcommand sets from policy (backward compat)
+  config.ts         CLI argument parsing (--cwd, --policy, --git-timeout, etc.)
+  probe.ts          Startup probes for binaries, identity, SSH, gh auth
+  probe-helpers.ts  Probe utilities (git config reads, defaults)
+  format.ts         Output formatting (ANSI stripping, truncation)
+  doctor.ts         Doctor tool registration and diagnostic formatting
+  onboard.ts        Onboard tool for guided setup
+  constants.ts      Shared constants (timeouts, env key mappings)
 dist/
   mcp-sandboxed-git-gh-cli   Compiled standalone binary
 ```
