@@ -1,7 +1,8 @@
+import { basename } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ProbeResults } from "./probe.js";
 import type { ServerConfig } from "./config.js";
-import { check, textResult } from "./format.js";
+import { check, textResult, stripAnsi } from "./format.js";
 
 function formatReport(probes: ProbeResults, ghRegistered: boolean, config: ServerConfig): string {
   const lines: string[] = [];
@@ -9,17 +10,18 @@ function formatReport(probes: ProbeResults, ghRegistered: boolean, config: Serve
   const SIGNING_TEST_LABEL = "signing test (ssh-keygen file-based):";
 
   lines.push("## Environment");
-  lines.push(`  HOME: ${probes.env.home ?? "(not set)"}`);
-  lines.push(`  PATH: ${probes.env.path ?? "(not set)"}`);
+  lines.push(`  HOME: ${probes.env.home ? "(set)" : "(not set)"}`);
+  const pathComponents = probes.env.path ? probes.env.path.split(":").length : 0;
+  lines.push(`  PATH: ${probes.env.path ? `(set, ${pathComponents} components)` : "(not set)"}`);
   lines.push(
-    `  SSH_AUTH_SOCK: ${probes.env.sshAuthSock ?? "(not set)"}`,
+    `  SSH_AUTH_SOCK: ${probes.env.sshAuthSock ? "(set)" : "(not set)"}`,
   );
   lines.push(
-    `  MCP_GH_USER: ${probes.env.mcpGhUser ?? "(not set)"}`,
+    `  MCP_GH_USER: ${probes.env.mcpGhUser ? stripAnsi(probes.env.mcpGhUser) : "(not set)"}`,
   );
   lines.push(`  GH_TOKEN: ${probes.env.ghToken ? "(set)" : "(not set)"}`);
   lines.push(
-    `  GH_CONFIG_DIR: ${probes.env.ghConfigDir ?? "(not set)"}`,
+    `  GH_CONFIG_DIR: ${probes.env.ghConfigDir ? "(set)" : "(not set)"}`,
   );
   lines.push("");
 
@@ -32,8 +34,9 @@ function formatReport(probes: ProbeResults, ghRegistered: boolean, config: Serve
 
   lines.push("## Binaries");
   for (const name of ["git", "gh", "ssh", "gpg"] as const) {
+    const version = probes[name].version ? stripAnsi(probes[name].version!) : "not found";
     lines.push(
-      `  ${name}: ${check(probes[name].found)} ${probes[name].version ?? "not found"}`,
+      `  ${name}: ${check(probes[name].found)} ${version}`,
     );
   }
   lines.push("");
@@ -63,12 +66,12 @@ function formatReport(probes: ProbeResults, ghRegistered: boolean, config: Serve
     lines.push(`  gpg.format: ${s.gpgFormat ?? "(not set)"}`);
     lines.push(`  commit.gpgsign: ${s.commitGpgsign}`);
     if (s.signingKey) {
-      lines.push(`  user.signingkey: ${s.signingKey}`);
+      lines.push(`  user.signingkey: ${basename(s.signingKey)}`);
       if (s.signingKeySource) {
-        lines.push(`  signingkey source: ${s.signingKeySource}`);
+        lines.push(`  signingkey source: ${s.signingKeySource.includes("/") ? "(config file)" : s.signingKeySource}`);
       }
     } else {
-      lines.push(`  user.signingkey: ${s.signingKey ?? "(not set)"}`);
+      lines.push(`  user.signingkey: (not set)`);
     }
 
     if (s.signingTest.attempted) {
@@ -87,11 +90,11 @@ function formatReport(probes: ProbeResults, ghRegistered: boolean, config: Serve
           `  ${SIGNING_TEST_LABEL} ${check(false)} FAILED`,
         );
         if (s.signingTest.error) {
-          lines.push(`  error: ${s.signingTest.error}`);
+          lines.push(`  error: ${stripAnsi(s.signingTest.error)}`);
         }
         recommendations.push(
           "SSH signing test failed. git commit -S will silently produce unsigned commits.\n" +
-            `Error: ${s.signingTest.error ?? "(unknown)"}\n` +
+            `Error: ${s.signingTest.error ? stripAnsi(s.signingTest.error) : "(unknown)"}\n` +
             "\n" +
             "Common causes:\n" +
             "  - The private key requires a passphrase but the SSH agent cannot provide it\n" +
@@ -136,7 +139,7 @@ function formatReport(probes: ProbeResults, ghRegistered: boolean, config: Serve
         '  "SSH_AUTH_SOCK": "${SSH_AUTH_SOCK}"',
     );
   } else {
-    lines.push(`  Socket: ${probes.env.sshAuthSock}`);
+    lines.push(`  Socket: (set)`);
     if (!probes.sshAgent.socketReachable) {
       lines.push("  Agent reachable: no");
       recommendations.push(
@@ -175,12 +178,13 @@ function formatReport(probes: ProbeResults, ghRegistered: boolean, config: Serve
     lines.push(`  Status: authentication failed`);
     lines.push(`  Auth method attempted: ${probes.ghAuth.authMethod}`);
     if (probes.ghAuth.error) {
-      lines.push(`  Error: ${probes.ghAuth.error}`);
+      lines.push(`  Error: ${stripAnsi(probes.ghAuth.error)}`);
     }
 
     if (probes.ghAuth.authMethod === "user") {
+      const safeUser = probes.env.mcpGhUser ? stripAnsi(probes.env.mcpGhUser) : "(unknown)";
       recommendations.push(
-        `MCP_GH_USER is set to "${probes.env.mcpGhUser}" but token resolution failed.\n` +
+        `MCP_GH_USER is set to "${safeUser}" but token resolution failed.\n` +
           `The account may not exist locally. Run:\n` +
           `  gh auth login\n` +
           `Then restart the MCP server.`,
@@ -260,6 +264,9 @@ function formatReport(probes: ProbeResults, ghRegistered: boolean, config: Serve
     lines.push("  No issues found.");
     lines.push("");
   }
+
+  lines.push("---");
+  lines.push("Note: This report reflects state at server startup. Restart the server to refresh.");
 
   return lines.join("\n");
 }

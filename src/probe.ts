@@ -1,6 +1,7 @@
-import { writeFileSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { openSync, writeSync, closeSync, unlinkSync, constants as fsConstants } from "node:fs";
+import { join, isAbsolute } from "node:path";
 import { tmpdir } from "node:os";
+import { randomBytes } from "node:crypto";
 import { probeExec, readGitConfig, readGitConfigOrigin, DEFAULT_GIT_IDENTITY, DEFAULT_GIT_SIGNING } from "./probe-helpers.js";
 
 export interface BinaryProbe {
@@ -37,6 +38,7 @@ export interface GhAuthProbe {
   account: string | null;
   authMethod: "user" | "token" | "config-dir" | null;
   error: string | null;
+  resolvedToken?: string; // Resolved token to be set by main() explicitly
 }
 
 export interface ProbeResults {
@@ -100,15 +102,22 @@ async function probeGitSigning(): Promise<GitSigningProbe> {
     return { ...base, signingTest: { attempted: false, success: false, error: null } };
   }
 
-  const tmpFile = join(tmpdir(), `.mcp_doctor_sign_test_${process.pid}`);
+  // Validate signing key path before passing to ssh-keygen
+  if (!isAbsolute(signingKey) || signingKey.includes("..")) {
+    return { ...base, signingTest: { attempted: false, success: false, error: "invalid signing key path" } };
+  }
+
+  // Use unpredictable filename + exclusive creation to prevent symlink attacks
+  const tmpFile = join(tmpdir(), `.mcp_sign_test_${randomBytes(12).toString("hex")}`);
   let signResult: { exitCode: number; stderr: string; stdout: string };
   try {
-    writeFileSync(tmpFile, "doctor-signing-test");
+    const fd = openSync(tmpFile, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
+    writeSync(fd, "doctor-signing-test");
+    closeSync(fd);
     signResult = await probeExec("ssh-keygen", ["-Y", "sign", "-n", "git", "-f", signingKey, tmpFile]);
   } finally {
-    try {
-      unlinkSync(tmpFile);
-    } catch {}
+    try { unlinkSync(tmpFile); } catch {}
+    try { unlinkSync(tmpFile + ".sig"); } catch {}
   }
 
   if (signResult.exitCode === 0) {
@@ -171,6 +180,16 @@ async function resolveGhAuth(ghFound: boolean): Promise<GhAuthProbe> {
   }
 
   if (mcpGhUser) {
+    // Validate username to prevent injection
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9-]*$/.test(mcpGhUser)) {
+      return {
+        authenticated: false,
+        account: null,
+        authMethod: "user",
+        error: "MCP_GH_USER contains invalid characters",
+      };
+    }
+
     const tokenResult = await probeExec("gh", ["auth", "token", "--user", mcpGhUser]);
 
     if (tokenResult.exitCode !== 0) {
@@ -183,11 +202,13 @@ async function resolveGhAuth(ghFound: boolean): Promise<GhAuthProbe> {
     }
 
     const resolvedToken = tokenResult.stdout.trim();
+    // Return the resolved token instead of mutating process.env here.
+    // main() in index.ts sets it explicitly.
+    const authStatus = await checkGhAuthStatus("user", mcpGhUser);
     if (resolvedToken) {
-      process.env.GH_TOKEN = resolvedToken;
+      authStatus.resolvedToken = resolvedToken;
     }
-
-    return checkGhAuthStatus("user", mcpGhUser);
+    return authStatus;
   }
 
   if (ghToken) {
@@ -198,7 +219,7 @@ async function resolveGhAuth(ghFound: boolean): Promise<GhAuthProbe> {
 }
 
 export async function runAllProbes(): Promise<ProbeResults> {
-  // Snapshot before auth resolution mutates process.env.GH_TOKEN
+  // Snapshot environment state before auth resolution
   const env = {
     home: process.env.HOME || null,
     path: process.env.PATH || null,

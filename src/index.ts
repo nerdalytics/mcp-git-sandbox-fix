@@ -1,11 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { basename } from "node:path";
 import { z } from "zod";
-import { execCommand } from "./executor.js";
-import {
-	GIT_ALLOWED_SUBCOMMANDS,
-	GH_ALLOWED_SUBCOMMANDS,
-} from "./allowlist.js";
+import { execCommand, setPolicy } from "./executor.js";
 import { textResult } from "./format.js";
 import { runAllProbes } from "./probe.js";
 import { registerDoctorTool } from "./doctor.js";
@@ -13,18 +10,23 @@ import { registerOnboardTool } from "./onboard.js";
 import { parseArgs } from "./config.js";
 import type { ServerConfig } from "./config.js";
 import { PROBE_TIMEOUT_MS } from "./constants.js";
+import { DEFAULT_POLICY, loadPolicy, allowedSubcommands } from "./policy.js";
+import type { SecurityPolicy } from "./policy.js";
+import { sanitizeArgs } from "./sanitizer.js";
 
 const server = new McpServer({
 	name: "mcp-sandboxed-git-gh-cli",
 	version: "0.1.0",
 });
 
-function validateSubcommand(subcommand: string, allowed: Set<string>) {
-	if (!allowed.has(subcommand)) {
-		return textResult(
-			`Subcommand "${subcommand}" is not allowed. Allowed: ${[...allowed].join(", ")}`,
-			true,
-		);
+function validateArgs(
+	tool: "git" | "gh",
+	args: string[],
+	policy: SecurityPolicy,
+) {
+	const result = sanitizeArgs(tool, args, policy);
+	if (!result.ok) {
+		return textResult(result.reason, true);
 	}
 	return null;
 }
@@ -39,7 +41,12 @@ function execResult(
 			true,
 		);
 	}
-	return textResult(result.stdout || result.stderr || "(no output)");
+	// Flag stderr-only output as an error — security warnings from git/gh
+	// (MITM, TLS, redirect) should not be silently presented as success.
+	if (!result.stdout && result.stderr) {
+		return textResult(result.stderr, true);
+	}
+	return textResult(result.stdout || "(no output)");
 }
 
 const sharedToolFields = {
@@ -56,18 +63,20 @@ const sharedToolFields = {
 
 async function runTool(
 	tool: "git" | "gh",
-	allowlist: Set<string>,
 	args: string[],
 	opts: { cwd?: string; stdin?: string; timeout_ms?: number },
 	config: ServerConfig,
+	policy: SecurityPolicy,
 ) {
-	const denied = validateSubcommand(args[0], allowlist);
+	const denied = validateArgs(tool, args, policy);
 	if (denied) return denied;
 
 	const effectiveCwd = opts.cwd || config.cwd || undefined;
-	const effectiveTimeout = opts.timeout_ms
-		?? (tool === "git" ? config.gitTimeout : config.ghTimeout)
-		?? undefined;
+	const effectiveTimeout =
+		(opts.timeout_ms != null && opts.timeout_ms > 0)
+			? opts.timeout_ms
+			: (tool === "git" ? config.gitTimeout : config.ghTimeout)
+			?? undefined;
 
 	const result = await execCommand(tool, {
 		args,
@@ -82,11 +91,25 @@ async function runTool(
 async function main() {
 	const config = parseArgs(process.argv);
 
+	// Load security policy: custom file merged over defaults, or defaults alone
+	const policy: SecurityPolicy = config.policyPath
+		? loadPolicy(config.policyPath)
+		: DEFAULT_POLICY;
+
+	// Push policy into the executor so every execCommand call enforces it
+	setPolicy(policy);
+
 	// --gh-user arg acts as a fallback for MCP_GH_USER env.
 	// Args take precedence only when the env var is not set,
 	// so env-based config (the existing pattern) still wins.
 	if (config.ghUser && !process.env.MCP_GH_USER) {
-		process.env.MCP_GH_USER = config.ghUser;
+		if (/^[a-zA-Z0-9][a-zA-Z0-9-]*$/.test(config.ghUser)) {
+			process.env.MCP_GH_USER = config.ghUser;
+		} else {
+			console.error(
+				`WARNING: --gh-user value contains invalid characters, ignoring`,
+			);
+		}
 	}
 
 	// Disable terminal prompts in child processes — prevents git/gh
@@ -97,13 +120,19 @@ async function main() {
 
 	const probes = await runAllProbes();
 
+	// Set resolved GH_TOKEN explicitly (previously mutated inside resolveGhAuth)
+	if (probes.ghAuth.resolvedToken) {
+		process.env.GH_TOKEN = probes.ghAuth.resolvedToken;
+	}
+
 	server.registerTool(
 		"git",
 		{
 			description:
 				"Run a git command outside the sandbox. Supports SSH signing, " +
 				"full TLS, and stdin for commit messages (use with -F - flag). " +
-				"The first element of args must be an allowed git subcommand.",
+				"The first element of args must be an allowed git subcommand. " +
+				"Some subcommands have restricted flags per the active security policy.",
 			inputSchema: {
 				args: z
 					.array(z.string())
@@ -118,7 +147,7 @@ async function main() {
 		},
 		async ({ args, cwd, stdin, timeout_ms }) => {
 			const subcommand = args[0];
-			const ran = await runTool("git", GIT_ALLOWED_SUBCOMMANDS, args, { cwd, stdin, timeout_ms }, config);
+			const ran = await runTool("git", args, { cwd, stdin, timeout_ms }, config, policy);
 			if ("content" in ran) return ran; // denied
 
 			const { result, effectiveCwd } = ran;
@@ -128,7 +157,9 @@ async function main() {
 			}
 
 			const isCommit = subcommand === "commit";
-			const explicitSign = args.includes("-S") || args.includes("--gpg-sign");
+			const explicitSign = args.some(
+				(a) => a === "-S" || a.startsWith("-S") || a === "--gpg-sign" || a.startsWith("--gpg-sign="),
+			);
 			let signingExpected = false;
 
 			if (isCommit) {
@@ -144,13 +175,29 @@ async function main() {
 			}
 
 			if (isCommit && signingExpected) {
+				// Capture the actual commit hash to avoid TOCTOU race
+				const hashResult = await execCommand("git", {
+					args: ["rev-parse", "HEAD"],
+					cwd: effectiveCwd,
+					timeout_ms: PROBE_TIMEOUT_MS,
+				});
+				const commitHash = hashResult.stdout.trim();
+
 				const rawCheck = await execCommand("git", {
-					args: ["show", "-s", "--format=raw", "HEAD"],
+					args: ["show", "-s", "--format=raw", commitHash],
 					cwd: effectiveCwd,
 					timeout_ms: PROBE_TIMEOUT_MS,
 				});
 
-				if (!rawCheck.stdout.includes("gpgsig ")) {
+				// Check for gpgsig only in the header section (before the
+				// first blank line that separates headers from the message body).
+				// This prevents false positives from commit messages containing "gpgsig ".
+				const headerSection = rawCheck.stdout.split("\n\n")[0] || "";
+				const hasSignature = headerSection.split("\n").some(
+					(line) => line.startsWith("gpgsig "),
+				);
+
+				if (!hasSignature) {
 					const signingKey = await execCommand("git", {
 						args: ["config", "user.signingkey"],
 						cwd: effectiveCwd,
@@ -163,8 +210,8 @@ async function main() {
 						`WARNING: Commit was created but is NOT signed.\n` +
 							`Signing was expected (${explicitSign ? "-S flag" : "commit.gpgsign=true"}) ` +
 							`but git produced an unsigned commit.\n` +
-							`user.signingkey: ${keyPath ?? "(not set in this repo)"}` +
-							`\nSSH_AUTH_SOCK: ${process.env.SSH_AUTH_SOCK ?? "(not set)"}` +
+							`user.signingkey: ${keyPath ? basename(keyPath) : "(not set in this repo)"}` +
+							`\nSSH_AUTH_SOCK: ${process.env.SSH_AUTH_SOCK ? "(set)" : "(not set)"}` +
 							`\n\ngit output:\n${result.stdout || "(no output)"}`,
 						true,
 					);
@@ -187,7 +234,8 @@ async function main() {
 				description:
 					"Run a GitHub CLI (gh) command outside the sandbox, bypassing " +
 					"TLS/Go binary sandbox issues. The first element of args must " +
-					"be an allowed gh subcommand.",
+					"be an allowed gh subcommand. " +
+					"Some subcommands have restricted actions per the active security policy.",
 				inputSchema: {
 					args: z
 						.array(z.string())
@@ -197,7 +245,7 @@ async function main() {
 				},
 			},
 			async ({ args, cwd, stdin, timeout_ms }) => {
-				const ran = await runTool("gh", GH_ALLOWED_SUBCOMMANDS, args, { cwd, stdin, timeout_ms }, config);
+				const ran = await runTool("gh", args, { cwd, stdin, timeout_ms }, config, policy);
 				if ("content" in ran) return ran; // denied
 				return execResult("gh", ran.result);
 			},
