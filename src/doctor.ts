@@ -6,6 +6,7 @@ import { check, textResult } from "./format.js";
 function formatReport(probes: ProbeResults, ghRegistered: boolean, config: ServerConfig): string {
   const lines: string[] = [];
   const recommendations: string[] = [];
+  const SIGNING_TEST_LABEL = "signing test (ssh-keygen file-based):";
 
   lines.push("## Environment");
   lines.push(`  HOME: ${probes.env.home ?? "(not set)"}`);
@@ -30,31 +31,21 @@ function formatReport(probes: ProbeResults, ghRegistered: boolean, config: Serve
   lines.push("");
 
   lines.push("## Binaries");
-  lines.push(
-    `  git: ${check(probes.git.found)} ${probes.git.version ?? "not found"}`,
-  );
-  lines.push(
-    `  gh: ${check(probes.gh.found)} ${probes.gh.version ?? "not found"}`,
-  );
-  lines.push(
-    `  ssh: ${check(probes.ssh.found)} ${probes.ssh.version ?? "not found"}`,
-  );
-  lines.push(
-    `  gpg: ${check(probes.gpg.found)} ${probes.gpg.version ?? "not found"}`,
-  );
+  for (const name of ["git", "gh", "ssh", "gpg"] as const) {
+    lines.push(
+      `  ${name}: ${check(probes[name].found)} ${probes[name].version ?? "not found"}`,
+    );
+  }
   lines.push("");
 
   lines.push("## Git Identity");
-  if (probes.gitIdentity.configured) {
-    lines.push(`  user.name: ${probes.gitIdentity.userName}`);
-    lines.push(`  user.email: ${probes.gitIdentity.userEmail}`);
-  } else {
-    lines.push(
-      `  user.name: ${probes.gitIdentity.userName ?? "(not set)"}`,
-    );
-    lines.push(
-      `  user.email: ${probes.gitIdentity.userEmail ?? "(not set)"}`,
-    );
+  lines.push(
+    `  user.name: ${probes.gitIdentity.userName ?? "(not set)"}`,
+  );
+  lines.push(
+    `  user.email: ${probes.gitIdentity.userEmail ?? "(not set)"}`,
+  );
+  if (!probes.gitIdentity.configured) {
     recommendations.push(
       "Git identity is not fully configured. Run:\n" +
         '  git config --global user.name "Your Name"\n' +
@@ -77,13 +68,13 @@ function formatReport(probes: ProbeResults, ghRegistered: boolean, config: Serve
         lines.push(`  signingkey source: ${s.signingKeySource}`);
       }
     } else {
-      lines.push("  user.signingkey: (not set)");
+      lines.push(`  user.signingkey: ${s.signingKey ?? "(not set)"}`);
     }
 
     if (s.signingTest.attempted) {
       if (s.signingTest.success) {
         lines.push(
-          `  signing test (ssh-keygen file-based): ${check(true)} passed`,
+          `  ${SIGNING_TEST_LABEL} ${check(true)} passed`,
         );
         lines.push(
           "  Note: This tests ssh-keygen with a temp file, matching how git invokes it.",
@@ -93,7 +84,7 @@ function formatReport(probes: ProbeResults, ghRegistered: boolean, config: Serve
         );
       } else {
         lines.push(
-          `  signing test (ssh-keygen file-based): ${check(false)} FAILED`,
+          `  ${SIGNING_TEST_LABEL} ${check(false)} FAILED`,
         );
         if (s.signingTest.error) {
           lines.push(`  error: ${s.signingTest.error}`);
@@ -144,22 +135,23 @@ function formatReport(probes: ProbeResults, ghRegistered: boolean, config: Serve
         "add to your server config (via `claude mcp add -e` or the env block in .mcp.json / .claude.json):\n" +
         '  "SSH_AUTH_SOCK": "${SSH_AUTH_SOCK}"',
     );
-  } else if (!probes.sshAgent.socketReachable) {
-    lines.push(`  Socket: ${probes.env.sshAuthSock}`);
-    lines.push("  Agent reachable: no");
-    recommendations.push(
-      "SSH_AUTH_SOCK is set but the agent is not responding.\n" +
-        "Ensure your SSH agent is running.",
-    );
   } else {
     lines.push(`  Socket: ${probes.env.sshAuthSock}`);
-    lines.push("  Agent reachable: yes");
-    lines.push(`  Identities loaded: ${probes.sshAgent.identityCount}`);
-    if (probes.sshAgent.identityCount === 0) {
+    if (!probes.sshAgent.socketReachable) {
+      lines.push("  Agent reachable: no");
       recommendations.push(
-        "SSH agent is running but has no keys loaded.\n" +
-          "Run ssh-add to add your default key, or ssh-add /path/to/key for a specific key.",
+        "SSH_AUTH_SOCK is set but the agent is not responding.\n" +
+          "Ensure your SSH agent is running.",
       );
+    } else {
+      lines.push("  Agent reachable: yes");
+      lines.push(`  Identities loaded: ${probes.sshAgent.identityCount}`);
+      if (probes.sshAgent.identityCount === 0) {
+        recommendations.push(
+          "SSH agent is running but has no keys loaded.\n" +
+            "Run ssh-add to add your default key, or ssh-add /path/to/key for a specific key.",
+        );
+      }
     }
   }
   lines.push("");

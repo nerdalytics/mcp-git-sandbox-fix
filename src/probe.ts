@@ -1,9 +1,7 @@
-import { execCommand } from "./executor.js";
 import { writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-
-const PROBE_TIMEOUT = 5_000;
+import { probeExec, readGitConfig, readGitConfigOrigin, DEFAULT_GIT_IDENTITY, DEFAULT_GIT_SIGNING } from "./probe-helpers.js";
 
 export interface BinaryProbe {
   found: boolean;
@@ -61,8 +59,7 @@ export interface ProbeResults {
 }
 
 async function probeBinary(name: string): Promise<BinaryProbe> {
-  const args = name === "ssh" ? ["-V"] : ["--version"];
-  const result = await execCommand(name, { args, timeout_ms: PROBE_TIMEOUT });
+  const result = await probeExec(name, name === "ssh" ? ["-V"] : ["--version"]);
 
   if (result.errorCode === "ENOENT") {
     return { found: false, version: null };
@@ -74,13 +71,10 @@ async function probeBinary(name: string): Promise<BinaryProbe> {
 }
 
 async function probeGitIdentity(): Promise<GitIdentityProbe> {
-  const [nameResult, emailResult] = await Promise.all([
-    execCommand("git", { args: ["config", "user.name"], timeout_ms: PROBE_TIMEOUT }),
-    execCommand("git", { args: ["config", "user.email"], timeout_ms: PROBE_TIMEOUT }),
+  const [userName, userEmail] = await Promise.all([
+    readGitConfig("user.name"),
+    readGitConfig("user.email"),
   ]);
-
-  const userName = nameResult.exitCode === 0 ? nameResult.stdout.trim() : null;
-  const userEmail = emailResult.exitCode === 0 ? emailResult.stdout.trim() : null;
 
   return {
     configured: userName !== null && userEmail !== null,
@@ -90,55 +84,27 @@ async function probeGitIdentity(): Promise<GitIdentityProbe> {
 }
 
 async function probeGitSigning(): Promise<GitSigningProbe> {
-  const [formatResult, gpgsignResult, keyResult] = await Promise.all([
-    execCommand("git", { args: ["config", "gpg.format"], timeout_ms: PROBE_TIMEOUT }),
-    execCommand("git", { args: ["config", "commit.gpgsign"], timeout_ms: PROBE_TIMEOUT }),
-    execCommand("git", {
-      args: ["config", "--show-origin", "user.signingkey"],
-      timeout_ms: PROBE_TIMEOUT,
-    }),
+  const [gpgFormat, gpgsignRaw, keyOrigin] = await Promise.all([
+    readGitConfig("gpg.format"),
+    readGitConfig("commit.gpgsign"),
+    readGitConfigOrigin("user.signingkey"),
   ]);
 
-  const gpgFormat =
-    formatResult.exitCode === 0 ? formatResult.stdout.trim() : null;
-  const commitGpgsign =
-    gpgsignResult.exitCode === 0 && gpgsignResult.stdout.trim() === "true";
+  const commitGpgsign = gpgsignRaw === "true";
+  const signingKey = keyOrigin?.value ?? null;
+  const signingKeySource = keyOrigin?.source ?? null;
 
-  let signingKey: string | null = null;
-  let signingKeySource: string | null = null;
-  if (keyResult.exitCode === 0) {
-    // --show-origin output: "file:/path/to/config\tvalue"
-    const raw = keyResult.stdout.trim();
-    const tabIndex = raw.indexOf("\t");
-    if (tabIndex !== -1) {
-      signingKeySource = raw.substring(0, tabIndex);
-      signingKey = raw.substring(tabIndex + 1);
-    } else {
-      signingKey = raw;
-    }
-  }
+  const base = { gpgFormat, commitGpgsign, signingKey, signingKeySource };
 
   if (gpgFormat !== "ssh" || !signingKey) {
-    return {
-      gpgFormat,
-      commitGpgsign,
-      signingKey,
-      signingKeySource,
-      signingTest: { attempted: false, success: false, error: null },
-    };
+    return { ...base, signingTest: { attempted: false, success: false, error: null } };
   }
 
-  // Test actual SSH signing using a temp FILE — matching how git invokes it:
-  //   ssh-keygen -Y sign -n git -f <pubkey> <file>
-  // NOT via stdin, which is a different code path that can give false positives.
   const tmpFile = join(tmpdir(), `.mcp_doctor_sign_test_${process.pid}`);
   let signResult: { exitCode: number; stderr: string; stdout: string };
   try {
     writeFileSync(tmpFile, "doctor-signing-test");
-    signResult = await execCommand("ssh-keygen", {
-      args: ["-Y", "sign", "-n", "git", "-f", signingKey, tmpFile],
-      timeout_ms: PROBE_TIMEOUT,
-    });
+    signResult = await probeExec("ssh-keygen", ["-Y", "sign", "-n", "git", "-f", signingKey, tmpFile]);
   } finally {
     try {
       unlinkSync(tmpFile);
@@ -146,23 +112,11 @@ async function probeGitSigning(): Promise<GitSigningProbe> {
   }
 
   if (signResult.exitCode === 0) {
-    return {
-      gpgFormat,
-      commitGpgsign,
-      signingKey,
-      signingKeySource,
-      signingTest: { attempted: true, success: true, error: null },
-    };
+    return { ...base, signingTest: { attempted: true, success: true, error: null } };
   }
 
   const error = (signResult.stderr || signResult.stdout).trim();
-  return {
-    gpgFormat,
-    commitGpgsign,
-    signingKey,
-    signingKeySource,
-    signingTest: { attempted: true, success: false, error },
-  };
+  return { ...base, signingTest: { attempted: true, success: false, error } };
 }
 
 async function probeSshAgent(): Promise<SshAgentProbe> {
@@ -171,17 +125,10 @@ async function probeSshAgent(): Promise<SshAgentProbe> {
     return { socketSet: false, socketReachable: false, identityCount: 0 };
   }
 
-  const result = await execCommand("ssh-add", {
-    args: ["-l"],
-    timeout_ms: PROBE_TIMEOUT,
-  });
+  const result = await probeExec("ssh-add", ["-l"]);
 
-  if (result.errorCode === "ENOENT") {
-    return { socketSet: true, socketReachable: false, identityCount: 0 };
-  }
-
-  // Exit 2 = agent unreachable, exit 1 = reachable but no identities
-  if (result.exitCode === 2) {
+  // ENOENT = ssh-add missing, exit 2 = agent unreachable
+  if (result.errorCode === "ENOENT" || result.exitCode === 2) {
     return { socketSet: true, socketReachable: false, identityCount: 0 };
   }
 
@@ -201,10 +148,7 @@ async function checkGhAuthStatus(
   authMethod: GhAuthProbe["authMethod"],
   fallbackAccount: string | null = null,
 ): Promise<GhAuthProbe> {
-  const statusResult = await execCommand("gh", {
-    args: ["auth", "status"],
-    timeout_ms: PROBE_TIMEOUT,
-  });
+  const statusResult = await probeExec("gh", ["auth", "status"]);
 
   const output = statusResult.stdout + statusResult.stderr;
   const match = output.match(/account\s+(\S+)/);
@@ -227,10 +171,7 @@ async function resolveGhAuth(ghFound: boolean): Promise<GhAuthProbe> {
   }
 
   if (mcpGhUser) {
-    const tokenResult = await execCommand("gh", {
-      args: ["auth", "token", "--user", mcpGhUser],
-      timeout_ms: PROBE_TIMEOUT,
-    });
+    const tokenResult = await probeExec("gh", ["auth", "token", "--user", mcpGhUser]);
 
     if (tokenResult.exitCode !== 0) {
       return {
@@ -276,18 +217,8 @@ export async function runAllProbes(): Promise<ProbeResults> {
 
   // Gated on binary availability from the first batch
   const [gitIdentity, gitSigning, sshAgent, ghAuth] = await Promise.all([
-    git.found
-      ? probeGitIdentity()
-      : { configured: false, userName: null, userEmail: null },
-    git.found
-      ? probeGitSigning()
-      : {
-          gpgFormat: null,
-          commitGpgsign: false,
-          signingKey: null,
-          signingKeySource: null,
-          signingTest: { attempted: false, success: false, error: null },
-        },
+    git.found ? probeGitIdentity() : DEFAULT_GIT_IDENTITY,
+    git.found ? probeGitSigning() : DEFAULT_GIT_SIGNING,
     probeSshAgent(),
     resolveGhAuth(gh.found),
   ]);
