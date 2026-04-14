@@ -2,13 +2,18 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ProbeResults } from "./probe.js";
 import type { ServerConfig } from "./config.js";
 import { z } from "zod";
-import { check, textResult } from "./format.js";
+import { check, textResult, stripAnsi } from "./format.js";
 import { SCOPES, GH_METHODS, AGENT_FILES, GH_ENV_KEYS } from "./constants.js";
 
+function shellEscape(value: string): string {
+  return "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
 function pushFenced(lines: string[], lang: string, content: string) {
-  lines.push(`\`\`\`${lang}`);
+  // Use 4-backtick fences to prevent content containing ``` from breaking out
+  lines.push(`\`\`\`\`${lang}`);
   lines.push(content);
-  lines.push("```");
+  lines.push("````");
 }
 
 function buildSurvey(
@@ -24,10 +29,10 @@ function buildSurvey(
 
   // Git
   if (probes.git.found) {
-    lines.push(`  ${check(true)} git found: ${probes.git.version}`);
+    lines.push(`  ${check(true)} git found: ${stripAnsi(probes.git.version ?? "")}`);
     if (probes.gitIdentity.configured) {
       lines.push(
-        `  ${check(true)} git identity: ${probes.gitIdentity.userName} <${probes.gitIdentity.userEmail}>`,
+        `  ${check(true)} git identity: ${stripAnsi(probes.gitIdentity.userName ?? "")} <${stripAnsi(probes.gitIdentity.userEmail ?? "")}>`,
       );
     } else {
       lines.push(`  ${check(false)} git identity not configured`);
@@ -44,7 +49,7 @@ function buildSurvey(
   // SSH
   lines.push("");
   if (probes.ssh.found) {
-    lines.push(`  ${check(true)} ssh found: ${probes.ssh.version}`);
+    lines.push(`  ${check(true)} ssh found: ${stripAnsi(probes.ssh.version ?? "")}`);
     if (probes.sshAgent.socketSet && probes.sshAgent.socketReachable) {
       lines.push(
         `  ${check(true)} SSH agent reachable, ${probes.sshAgent.identityCount} identit${probes.sshAgent.identityCount === 1 ? "y" : "ies"} loaded`,
@@ -71,7 +76,7 @@ function buildSurvey(
         if (s.signingTest.success) {
           lines.push(`  ${check(true)} signing test passed`);
         } else {
-          lines.push(`  ${check(false)} signing test FAILED: ${s.signingTest.error}`);
+          lines.push(`  ${check(false)} signing test FAILED: ${stripAnsi(s.signingTest.error ?? "")}`);
         }
       }
     } else {
@@ -88,7 +93,7 @@ function buildSurvey(
   // gh
   lines.push("");
   if (probes.gh.found) {
-    lines.push(`  ${check(true)} gh found: ${probes.gh.version}`);
+    lines.push(`  ${check(true)} gh found: ${stripAnsi(probes.gh.version ?? "")}`);
   } else {
     lines.push("  \u2014 gh not found");
   }
@@ -224,10 +229,13 @@ function buildConfig(
   }
 
   // gh auth: prefer --gh-user arg for non-secret values, env for tokens
+  const isTokenMethod = setup.gh_method === "token";
   if (setup.gh_method === "user" && setup.gh_value) {
     args.push("--gh-user", setup.gh_value);
   } else if (setup.gh_method && setup.gh_value && GH_ENV_KEYS[setup.gh_method as keyof typeof GH_ENV_KEYS]) {
-    env[GH_ENV_KEYS[setup.gh_method as keyof typeof GH_ENV_KEYS]] = setup.gh_value;
+    // Redact actual token value — emit placeholder instead
+    const envKey = GH_ENV_KEYS[setup.gh_method as keyof typeof GH_ENV_KEYS];
+    env[envKey] = isTokenMethod ? "<your-token>" : setup.gh_value;
   }
 
   if (setup.cwd) {
@@ -260,6 +268,12 @@ function buildConfig(
 
     lines.push("## Project Config (.mcp.json)");
     lines.push("");
+    if (isTokenMethod) {
+      lines.push("**WARNING:** .mcp.json is typically version-controlled.");
+      lines.push("Replace `<your-token>` with your actual token, but consider using");
+      lines.push("user-scope config (`scope: \"user\"`) for tokens to avoid committing secrets.");
+      lines.push("");
+    }
     lines.push("Create this file at the project root:");
     lines.push("");
     pushFenced(lines, "json", JSON.stringify(mcpJson, null, 2));
@@ -269,13 +283,13 @@ function buildConfig(
       "claude mcp add -s user -t stdio",
     ];
     for (const [key, value] of Object.entries(env)) {
-      cliParts.push(`-e ${key}='${value}'`);
+      cliParts.push(`-e ${key}=${shellEscape(value)}`);
     }
     cliParts.push("mcp-sandboxed-git-gh-cli");
-    cliParts.push(binaryPath);
+    cliParts.push(shellEscape(binaryPath));
     if (args.length > 0) {
       cliParts.push("--");
-      cliParts.push(...args);
+      cliParts.push(...args.map(shellEscape));
     }
 
     // Also show the JSON for manual editing
