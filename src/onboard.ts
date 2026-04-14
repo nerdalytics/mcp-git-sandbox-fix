@@ -3,6 +3,13 @@ import type { ProbeResults } from "./probe.js";
 import type { ServerConfig } from "./config.js";
 import { z } from "zod";
 import { check, textResult } from "./format.js";
+import { SCOPES, GH_METHODS, AGENT_FILES, GH_ENV_KEYS } from "./constants.js";
+
+function pushFenced(lines: string[], lang: string, content: string) {
+  lines.push(`\`\`\`${lang}`);
+  lines.push(content);
+  lines.push("```");
+}
 
 function buildSurvey(
   probes: ProbeResults,
@@ -133,9 +140,9 @@ function buildSurvey(
       question: "Do you need the GitHub CLI (gh) for PRs, issues, releases?",
       header: "GitHub CLI",
       options: [
-        { label: "MCP_GH_USER (Recommended)", description: "Specify your GitHub username — best for SSO and multi-account setups" },
-        { label: "GH_TOKEN", description: "Use a personal access token directly" },
-        { label: "GH_CONFIG_DIR", description: "Point to a gh config directory with stored credentials" },
+        { label: `${GH_ENV_KEYS.user} (Recommended)`, description: "Specify your GitHub username — best for SSO and multi-account setups" },
+        { label: GH_ENV_KEYS.token, description: "Use a personal access token directly" },
+        { label: GH_ENV_KEYS["config-dir"], description: "Point to a gh config directory with stored credentials" },
         { label: "No gh", description: "Skip GitHub CLI — git only" },
       ],
       multiSelect: false,
@@ -164,9 +171,7 @@ function buildSurvey(
   lines.push("If the user picks MCP_GH_USER or GH_TOKEN or GH_CONFIG_DIR,");
   lines.push("ask a follow-up for the value (username, token, or path).");
   lines.push("");
-  lines.push("```json");
-  lines.push(JSON.stringify(questions, null, 2));
-  lines.push("```");
+  pushFenced(lines, "json", JSON.stringify(questions, null, 2));
   lines.push("");
   lines.push("## Mapping answers to setup parameters");
   lines.push("");
@@ -218,17 +223,11 @@ function buildConfig(
     env["SSH_AUTH_SOCK"] = "${SSH_AUTH_SOCK}";
   }
 
-  const ghEnvKey: Record<string, string> = {
-    user: "MCP_GH_USER",
-    token: "GH_TOKEN",
-    "config-dir": "GH_CONFIG_DIR",
-  };
-
   // gh auth: prefer --gh-user arg for non-secret values, env for tokens
   if (setup.gh_method === "user" && setup.gh_value) {
     args.push("--gh-user", setup.gh_value);
-  } else if (setup.gh_method && setup.gh_value && ghEnvKey[setup.gh_method]) {
-    env[ghEnvKey[setup.gh_method]] = setup.gh_value;
+  } else if (setup.gh_method && setup.gh_value && GH_ENV_KEYS[setup.gh_method as keyof typeof GH_ENV_KEYS]) {
+    env[GH_ENV_KEYS[setup.gh_method as keyof typeof GH_ENV_KEYS]] = setup.gh_value;
   }
 
   if (setup.cwd) {
@@ -263,9 +262,7 @@ function buildConfig(
     lines.push("");
     lines.push("Create this file at the project root:");
     lines.push("");
-    lines.push("```json");
-    lines.push(JSON.stringify(mcpJson, null, 2));
-    lines.push("```");
+    pushFenced(lines, "json", JSON.stringify(mcpJson, null, 2));
   } else {
     // Global: ~/.claude.json format via claude mcp add
     const cliParts = [
@@ -295,15 +292,11 @@ function buildConfig(
     lines.push("");
     lines.push("### Option A: CLI command");
     lines.push("");
-    lines.push("```sh");
-    lines.push(cliParts.join(" \\\n  "));
-    lines.push("```");
+    pushFenced(lines, "sh", cliParts.join(" \\\n  "));
     lines.push("");
     lines.push("### Option B: Add to ~/.claude.json mcpServers");
     lines.push("");
-    lines.push("```json");
-    lines.push(JSON.stringify(claudeJson, null, 2));
-    lines.push("```");
+    pushFenced(lines, "json", JSON.stringify(claudeJson, null, 2));
   }
 
   lines.push("");
@@ -332,9 +325,7 @@ function buildConfig(
     lines.push("");
     lines.push(`Add the following to ${files.join(" and ")} in your project root:`);
     lines.push("");
-    lines.push("```markdown");
-    lines.push(snippet);
-    lines.push("```");
+    pushFenced(lines, "markdown", snippet);
 
     if (agentFile === "agents") {
       lines.push("");
@@ -363,13 +354,13 @@ export function registerOnboardTool(
         setup: z
           .object({
             scope: z
-              .enum(["project", "user"])
+              .enum(SCOPES)
               .describe('"project" for .mcp.json, "user" for ~/.claude.json'),
             ssh: z
               .boolean()
               .describe("Forward SSH_AUTH_SOCK for SSH operations and signing"),
             gh_method: z
-              .enum(["user", "token", "config-dir"])
+              .enum(GH_METHODS)
               .optional()
               .describe("gh auth method: user (MCP_GH_USER), token (GH_TOKEN), or config-dir (GH_CONFIG_DIR)"),
             gh_value: z
@@ -377,7 +368,7 @@ export function registerOnboardTool(
               .optional()
               .describe("Value for the chosen gh auth method (username, token, or path)"),
             agent_file: z
-              .enum(["claude", "agents", "both", "skip"])
+              .enum(AGENT_FILES)
               .optional()
               .describe("Which file to add tool hints to: claude (CLAUDE.md), agents (AGENTS.md), both, or skip"),
             cwd: z
