@@ -11,6 +11,8 @@ import { runAllProbes } from "./probe.js";
 import { registerDoctorTool } from "./doctor.js";
 import { registerOnboardTool } from "./onboard.js";
 import { parseArgs } from "./config.js";
+import type { ServerConfig } from "./config.js";
+import { PROBE_TIMEOUT_MS } from "./constants.js";
 
 const server = new McpServer({
 	name: "mcp-sandboxed-git-gh-cli",
@@ -38,6 +40,43 @@ function execResult(
 		);
 	}
 	return textResult(result.stdout || result.stderr || "(no output)");
+}
+
+const sharedToolFields = {
+	cwd: z
+		.string()
+		.optional()
+		.describe("Working directory (defaults to server cwd)"),
+	stdin: z.string().optional().describe("Text piped to stdin"),
+	timeout_ms: z
+		.number()
+		.optional()
+		.describe("Timeout in ms (default 60000)"),
+};
+
+async function runTool(
+	tool: "git" | "gh",
+	allowlist: Set<string>,
+	args: string[],
+	opts: { cwd?: string; stdin?: string; timeout_ms?: number },
+	config: ServerConfig,
+) {
+	const denied = validateSubcommand(args[0], allowlist);
+	if (denied) return denied;
+
+	const effectiveCwd = opts.cwd || config.cwd || undefined;
+	const effectiveTimeout = opts.timeout_ms
+		?? (tool === "git" ? config.gitTimeout : config.ghTimeout)
+		?? undefined;
+
+	const result = await execCommand(tool, {
+		args,
+		cwd: effectiveCwd,
+		stdin: opts.stdin,
+		timeout_ms: effectiveTimeout,
+	});
+
+	return { result, effectiveCwd };
 }
 
 async function main() {
@@ -70,32 +109,24 @@ async function main() {
 					.array(z.string())
 					.min(1)
 					.describe('Git arguments, e.g. ["commit", "-S", "-F", "-"]'),
-				cwd: z
-					.string()
-					.optional()
-					.describe("Working directory (defaults to server cwd)"),
+				...sharedToolFields,
 				stdin: z
 					.string()
 					.optional()
 					.describe("Text piped to stdin, useful with git commit -F -"),
-				timeout_ms: z
-					.number()
-					.optional()
-					.describe("Timeout in ms (default 60000)"),
 			},
 		},
 		async ({ args, cwd, stdin, timeout_ms }) => {
 			const subcommand = args[0];
+			const ran = await runTool("git", GIT_ALLOWED_SUBCOMMANDS, args, { cwd, stdin, timeout_ms }, config);
+			if ("content" in ran) return ran; // denied
 
-			const denied = validateSubcommand(subcommand, GIT_ALLOWED_SUBCOMMANDS);
-			if (denied) return denied;
+			const { result, effectiveCwd } = ran;
 
-			const effectiveCwd = cwd || config.cwd || undefined;
-			const effectiveTimeout = timeout_ms ?? config.gitTimeout ?? undefined;
+			if (result.exitCode !== 0) {
+				return execResult("git", result);
+			}
 
-			// Detect whether this commit should be signed so we can verify afterward.
-			// git silently produces unsigned commits when signing fails, so we
-			// check the raw commit object post-commit to catch that.
 			const isCommit = subcommand === "commit";
 			const explicitSign = args.includes("-S") || args.includes("--gpg-sign");
 			let signingExpected = false;
@@ -104,7 +135,7 @@ async function main() {
 				const gpgsignCheck = await execCommand("git", {
 					args: ["config", "commit.gpgsign"],
 					cwd: effectiveCwd,
-					timeout_ms: 5000,
+					timeout_ms: PROBE_TIMEOUT_MS,
 				});
 				signingExpected =
 					explicitSign ||
@@ -112,33 +143,18 @@ async function main() {
 						gpgsignCheck.stdout.trim() === "true");
 			}
 
-			const result = await execCommand("git", {
-				args,
-				cwd: effectiveCwd,
-				stdin,
-				timeout_ms: effectiveTimeout,
-			});
-
-			if (result.exitCode !== 0) {
-				return execResult("git", result);
-			}
-
-			// Post-commit signature verification.
-			// Check for the gpgsig header in the raw commit object instead of
-			// %G?, which requires gpg.ssh.allowedSignersFile for SSH signatures
-			// and returns "N" (no signature) even when a valid signature exists.
 			if (isCommit && signingExpected) {
 				const rawCheck = await execCommand("git", {
 					args: ["show", "-s", "--format=raw", "HEAD"],
 					cwd: effectiveCwd,
-					timeout_ms: 5000,
+					timeout_ms: PROBE_TIMEOUT_MS,
 				});
 
 				if (!rawCheck.stdout.includes("gpgsig ")) {
 					const signingKey = await execCommand("git", {
 						args: ["config", "user.signingkey"],
 						cwd: effectiveCwd,
-						timeout_ms: 5000,
+						timeout_ms: PROBE_TIMEOUT_MS,
 					});
 					const keyPath =
 						signingKey.exitCode === 0 ? signingKey.stdout.trim() : null;
@@ -155,7 +171,7 @@ async function main() {
 				}
 			}
 
-			return textResult(result.stdout || result.stderr || "(no output)");
+			return execResult("git", result);
 		},
 	);
 
@@ -177,28 +193,13 @@ async function main() {
 						.array(z.string())
 						.min(1)
 						.describe('gh arguments, e.g. ["pr", "list", "--limit", "10"]'),
-					cwd: z
-						.string()
-						.optional()
-						.describe("Working directory (defaults to server cwd)"),
-					stdin: z.string().optional().describe("Text piped to stdin"),
-					timeout_ms: z
-						.number()
-						.optional()
-						.describe("Timeout in ms (default 60000)"),
+					...sharedToolFields,
 				},
 			},
 			async ({ args, cwd, stdin, timeout_ms }) => {
-				const denied = validateSubcommand(args[0], GH_ALLOWED_SUBCOMMANDS);
-				if (denied) return denied;
-
-				const result = await execCommand("gh", {
-					args,
-					cwd: cwd || config.cwd || undefined,
-					stdin,
-					timeout_ms: timeout_ms ?? config.ghTimeout ?? undefined,
-				});
-				return execResult("gh", result);
+				const ran = await runTool("gh", GH_ALLOWED_SUBCOMMANDS, args, { cwd, stdin, timeout_ms }, config);
+				if ("content" in ran) return ran; // denied
+				return execResult("gh", ran.result);
 			},
 		);
 	}
